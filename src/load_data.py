@@ -48,35 +48,53 @@ def flatten_prospects(prospects_dict: dict) -> pd.DataFrame:
 
 def merge_all(jobs_dict: dict, applicants_dict: dict, prospects_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Une os dados de candidatos, vagas e prospecções em um único DataFrame consolidado.
+    Une os dados de candidatos, vagas e prospecções em um único DataFrame consolidado,
+    com diagnóstico e acesso correto a campos aninhados.
     """
-    merged_rows = []
-    for _, row in prospects_df.iterrows():
-        vaga_id = row["vaga_id"]
-        candidato_id = row["candidato_id"]
 
-        vaga_data = jobs_dict.get(str(vaga_id), {})
-        candidato_data = applicants_dict.get(str(candidato_id), {})
+    merged_rows = []
+
+    def safe_key(k):
+        try:
+            return int(float(k))
+        except:
+            return str(k).strip()
+
+    applicants_dict_clean = {safe_key(k): v for k, v in applicants_dict.items()}
+    jobs_dict_clean = {safe_key(k): v for k, v in jobs_dict.items()}
+
+    for _, row in prospects_df.iterrows():
+        vaga_key = safe_key(row["vaga_id"])
+        candidato_key = safe_key(row["candidato_id"])
+
+        vaga_data = jobs_dict_clean.get(vaga_key, {})
+        candidato_data = applicants_dict_clean.get(candidato_key, {})
+
+        # Acesso seguro aos campos da vaga
+        informacoes_basicas = vaga_data.get("informacoes_basicas", {})
+        perfil_vaga = vaga_data.get("perfil_vaga", {})
 
         merged_row = {
-            "vaga_id": vaga_id,
-            "candidato_id": candidato_id,
+            "vaga_id": vaga_key,
+            "candidato_id": candidato_key,
             "situacao": row["situacao"],
             "comentario": row["comentario"],
             "nome": row["nome"],
-            # Inclui campos úteis diretamente do dicionário da vaga
-            "cliente": vaga_data.get("cliente"),
-            "sap": vaga_data.get("eh_vaga_sap"),
-            "nivel_profissional": vaga_data.get("nivel_profissional"),
-            "idioma": vaga_data.get("idioma"),
-            "competencias_tecnicas": vaga_data.get("competencias_tecnicas"),
-            # E do candidato
-            "nivel_academico": candidato_data.get("nivel_academico"),
-            "ingles": candidato_data.get("nivel_ingles"),
-            "espanhol": candidato_data.get("nivel_espanhol"),
-            "area_atuacao": candidato_data.get("area_atuacao"),
-            "conhecimentos": candidato_data.get("conhecimentos_tecnicos"),
-            "cv": candidato_data.get("cv")
+            "titulo_vaga": row.get("titulo_vaga"),
+            "modalidade_vaga": row.get("modalidade_vaga"),
+            # Campos da vaga (corrigidos)
+            "cliente": informacoes_basicas.get("cliente"),
+            "sap": informacoes_basicas.get("vaga_sap"),
+            "nivel_profissional": perfil_vaga.get("nivel profissional"),
+            "idioma": perfil_vaga.get("nivel_ingles"),
+            "competencias_tecnicas": perfil_vaga.get("competencia_tecnicas_e_comportamentais"),
+            # Campos do candidato
+            "nivel_academico": candidato_data.get("formacao_e_idiomas", {}).get("nivel_academico"),
+            "ingles": candidato_data.get("formacao_e_idiomas", {}).get("nivel_ingles"),
+            "espanhol": candidato_data.get("formacao_e_idiomas", {}).get("nivel_espanhol"),
+            "area_atuacao": candidato_data.get("informacoes_profissionais", {}).get("area_atuacao"),
+            "conhecimentos": candidato_data.get("informacoes_profissionais", {}).get("conhecimentos_tecnicos"),
+            "cv": candidato_data.get("cv_pt")
         }
 
         merged_rows.append(merged_row)
