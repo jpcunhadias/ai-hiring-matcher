@@ -3,12 +3,10 @@ from dotenv import load_dotenv
 from evidently.metric_preset import DataDriftPreset
 from evidently.report import Report
 
-from src.utils import load_df_from_s3, setup_logging
+from src.utils import load_df_from_s3, logger
 
-logger = setup_logging("drift")
 load_dotenv()
 
-# Caminho no S3
 DF_MODEL_KEY = "data/processed/df_model.csv"
 
 
