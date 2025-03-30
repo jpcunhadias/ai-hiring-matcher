@@ -65,17 +65,16 @@ def flatten_prospects(prospects_dict: dict) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
+def safe_key(k):
+    try:
+        return int(float(k))
+    except (ValueError, TypeError):
+        return str(k).strip()
 
 def merge_all(
         jobs_dict: dict, applicants_dict: dict, prospects_df: pd.DataFrame
 ) -> pd.DataFrame:
     merged_rows = []
-
-    def safe_key(k):
-        try:
-            return int(float(k))
-        except (ValueError, TypeError):
-            return str(k).strip()
 
     applicants_dict_clean = {safe_key(k): v for k, v in applicants_dict.items()}
     jobs_dict_clean = {safe_key(k): v for k, v in jobs_dict.items()}
