@@ -15,21 +15,33 @@ def create_target_variable(df: pd.DataFrame) -> pd.DataFrame:
     valores_sucesso = [
         "Contratado pela Decision",
         "Contratado como Hunting",
-        "Proposta Aceita"
+        "Proposta Aceita",
     ]
     valores_excluir = [
-        "Prospect", "Inscrito", "Encaminhado ao Requisitante",
-        "Entrevista Técnica", "Entrevista com Cliente",
-        "Em avaliação pelo RH", "Encaminhar Proposta",
-        "Documentação PJ", "Documentação CLT", "Documentação Cooperado"
+        "Prospect",
+        "Inscrito",
+        "Encaminhado ao Requisitante",
+        "Entrevista Técnica",
+        "Entrevista com Cliente",
+        "Em avaliação pelo RH",
+        "Encaminhar Proposta",
+        "Documentação PJ",
+        "Documentação CLT",
+        "Documentação Cooperado",
     ]
 
     df = df[~df["situacao"].isin(valores_excluir)].copy()
     df["target"] = df["situacao"].apply(lambda x: 1 if x in valores_sucesso else 0)
 
     selected_columns = [
-        "nivel_academico", "ingles", "espanhol", "area_atuacao",
-        "nivel_profissional", "sap", "cliente", "target"
+        "nivel_academico",
+        "ingles",
+        "espanhol",
+        "area_atuacao",
+        "nivel_profissional",
+        "sap",
+        "cliente",
+        "target",
     ]
 
     return df[selected_columns]

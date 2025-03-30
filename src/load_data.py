@@ -34,10 +34,6 @@ def load_json_files():
 
 
 def flatten_prospects(prospects_dict: dict) -> pd.DataFrame:
-    """
-    Converte o dicionário de prospecções em um DataFrame plano com colunas:
-    vaga_id, candidato_id, situacao, nome, comentario, etc.
-    """
     rows = []
 
     for vaga_id, dados_vaga in prospects_dict.items():
@@ -62,11 +58,6 @@ def flatten_prospects(prospects_dict: dict) -> pd.DataFrame:
 
 
 def merge_all(jobs_dict: dict, applicants_dict: dict, prospects_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Une os dados de candidatos, vagas e prospecções em um único DataFrame consolidado,
-    com diagnóstico e acesso correto a campos aninhados.
-    """
-
     merged_rows = []
 
     def safe_key(k):
@@ -85,7 +76,6 @@ def merge_all(jobs_dict: dict, applicants_dict: dict, prospects_df: pd.DataFrame
         vaga_data = jobs_dict_clean.get(vaga_key, {})
         candidato_data = applicants_dict_clean.get(candidato_key, {})
 
-        # Acesso seguro aos campos da vaga
         informacoes_basicas = vaga_data.get("informacoes_basicas", {})
         perfil_vaga = vaga_data.get("perfil_vaga", {})
 
@@ -97,13 +87,11 @@ def merge_all(jobs_dict: dict, applicants_dict: dict, prospects_df: pd.DataFrame
             "nome": row["nome"],
             "titulo_vaga": row.get("titulo_vaga"),
             "modalidade_vaga": row.get("modalidade_vaga"),
-            # Campos da vaga (corrigidos)
             "cliente": informacoes_basicas.get("cliente"),
             "sap": informacoes_basicas.get("vaga_sap"),
             "nivel_profissional": perfil_vaga.get("nivel profissional"),
             "idioma": perfil_vaga.get("nivel_ingles"),
             "competencias_tecnicas": perfil_vaga.get("competencia_tecnicas_e_comportamentais"),
-            # Campos do candidato
             "nivel_academico": candidato_data.get("formacao_e_idiomas", {}).get("nivel_academico"),
             "ingles": candidato_data.get("formacao_e_idiomas", {}).get("nivel_ingles"),
             "espanhol": candidato_data.get("formacao_e_idiomas", {}).get("nivel_espanhol"),

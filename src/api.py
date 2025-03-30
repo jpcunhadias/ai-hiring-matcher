@@ -1,14 +1,20 @@
+import pandas as pd
 from fastapi import FastAPI
 from pydantic import BaseModel
-import pandas as pd
-import joblib
 
-model = joblib.load("models/modelo_priorizacao_xgb.pkl")
+from src.predict_model import load_model, predict_proba
 
-app = FastAPI(title="API de Priorização de Candidatos", version="1.0")
+app = FastAPI(
+    title="Prioriza Candidatos",
+    description="API para prever probabilidade de contratação de candidatos",
+    version="1.0.0",
+)
+
+# Carrega modelo na inicialização da API
+model = load_model()
 
 
-class CandidatoInput(BaseModel):
+class Candidate(BaseModel):
     nivel_academico: str
     ingles: str
     espanhol: str
@@ -18,20 +24,19 @@ class CandidatoInput(BaseModel):
     cliente: str
 
 
-def priorizar_candidatos(df_input, modelo, top_n=1):
-    df_copy = df_input.copy()
-    df_copy = df_copy.drop(columns=["target"], errors="ignore")
-
-    # Previsão
-    probs = modelo.predict_proba(df_copy)[:, 1]
-    df_copy["prob_contratacao"] = probs
-
-    df_ranked = df_copy.sort_values(by="prob_contratacao", ascending=False)
-    return df_ranked.head(top_n)
+@app.get("/")
+def read_root():
+    return {"message": "API de priorização de candidatos está no ar!"}
 
 
 @app.post("/predict")
-def predict(data: CandidatoInput):
+def predict(data: Candidate):
+    # Converte o input para DataFrame
     df = pd.DataFrame([data.model_dump()])
-    resultado = priorizar_candidatos(df, model, top_n=1)
-    return resultado[["prob_contratacao"]].to_dict(orient="records")[0]
+
+    # Faz a predição
+    result_df = predict_proba(model, df, top_n=1)
+
+    # Retorna a probabilidade do primeiro (e único) candidato
+    prob = result_df.iloc[0]["prob_contratacao"]
+    return {"prob_contratacao": round(float(prob), 8)}

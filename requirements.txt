@@ -9,3 +9,6 @@ xgboost
 scikit-learn
 joblib
 pytest
+boto3
+s3fs
+python-dotenv
