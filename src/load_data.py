@@ -1,20 +1,35 @@
 import json
+import os
+
+import boto3
 import pandas as pd
+from dotenv import load_dotenv
+
+from src.utils import save_df_to_s3
+
+load_dotenv()
+
+BUCKET = os.getenv("S3_BUCKET_NAME")
+RAW_PATH = os.getenv("RAW_PATH")
+
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    region_name=os.getenv("AWS_DEFAULT_REGION")
+)
 
 
-def load_json_files(jobs_path: str, prospects_path: str, applicants_path: str):
-    """
-    Carrega os arquivos JSON e retorna os dados como dicionários.
-    """
-    with open(jobs_path, 'r', encoding='utf-8') as f:
-        jobs_dict = json.load(f)
+def read_json_from_s3(key: str) -> dict:
+    response = s3.get_object(Bucket=BUCKET, Key=key)
+    content = response["Body"].read()
+    return json.loads(content)
 
-    with open(prospects_path, 'r', encoding='utf-8') as f:
-        prospects_dict = json.load(f)
 
-    with open(applicants_path, 'r', encoding='utf-8') as f:
-        applicants_dict = json.load(f)
-
+def load_json_files():
+    jobs_dict = read_json_from_s3(f"{RAW_PATH}jobs.json")
+    prospects_dict = read_json_from_s3(f"{RAW_PATH}prospects.json")
+    applicants_dict = read_json_from_s3(f"{RAW_PATH}applicants.json")
     return jobs_dict, prospects_dict, applicants_dict
 
 
@@ -102,17 +117,16 @@ def merge_all(jobs_dict: dict, applicants_dict: dict, prospects_df: pd.DataFrame
     return pd.DataFrame(merged_rows)
 
 
+def load_and_merge_data(save: bool = True) -> pd.DataFrame:
+    jobs_dict, prospects_dict, applicants_dict = load_json_files()
+    prospects_df = flatten_prospects(prospects_dict)
+    merged_df = merge_all(jobs_dict, applicants_dict, prospects_df)
+
+    if save:
+        save_df_to_s3(merged_df, "data/processed/merged_data.csv")
+
+    return merged_df
+
+
 if __name__ == "__main__":
-    # Caminhos esperados dos arquivos
-    jobs_path = "../data/raw/jobs.json"
-    prospects_path = "../data/raw/prospects.json"
-    applicants_path = "../data/raw/applicants.json"
-
-    # Executa pipeline de carregamento
-    jobs, prospects, applicants = load_json_files(jobs_path, prospects_path, applicants_path)
-    prospects_df = flatten_prospects(prospects)
-    merged_df = merge_all(jobs, applicants, prospects_df)
-
-    # Salva consolidado
-    merged_df.to_csv("../data/processed/merged_data.csv", index=False)
-    print("Arquivo salvo em ../data/processed/merged_data.csv")
+    load_and_merge_data()
