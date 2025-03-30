@@ -3,6 +3,7 @@ import os
 
 import boto3
 import pandas as pd
+from botocore.config import Config
 from dotenv import load_dotenv
 
 from src.utils import save_df_to_s3, logger
@@ -12,11 +13,14 @@ load_dotenv()
 BUCKET = os.getenv("S3_BUCKET_NAME")
 RAW_PATH = os.getenv("RAW_PATH")
 
+custom_config = Config(connect_timeout=10, read_timeout=120)
+
 s3 = boto3.client(
     "s3",
     aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
     aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     region_name=os.getenv("AWS_DEFAULT_REGION"),
+    config=custom_config,
 )
 
 
@@ -24,6 +28,21 @@ def read_json_from_s3(key: str) -> dict:
     response = s3.get_object(Bucket=BUCKET, Key=key)
     content = response["Body"].read()
     return json.loads(content)
+
+
+def read_parquet_from_s3(key: str) -> pd.DataFrame:
+    """
+    Lê um arquivo Parquet diretamente do S3 e retorna como DataFrame.
+    """
+    s3_path = f"s3://{BUCKET}/{key}"
+    return pd.read_parquet(
+        s3_path,
+        storage_options={
+            "key": os.getenv("AWS_ACCESS_KEY_ID"),
+            "secret": os.getenv("AWS_SECRET_ACCESS_KEY"),
+            "client_kwargs": {"region_name": os.getenv("AWS_DEFAULT_REGION")},
+        },
+    )
 
 
 def load_json_files():
@@ -34,8 +53,9 @@ def load_json_files():
     prospects_dict = read_json_from_s3(f"{RAW_PATH}prospects.json")
     logger.info("Carregado: prospects.json")
 
-    applicants_dict = read_json_from_s3(f"{RAW_PATH}applicants.json")
-    logger.info("Carregado: applicants.json")
+    applicants_df = read_parquet_from_s3(f"{RAW_PATH}applicants.parquet")
+    applicants_dict = applicants_df.to_dict(orient="index")
+    logger.info("Carregado: applicants.parquet")
 
     return jobs_dict, prospects_dict, applicants_dict
 
@@ -65,14 +85,16 @@ def flatten_prospects(prospects_dict: dict) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
+
 def safe_key(k):
     try:
         return int(float(k))
     except (ValueError, TypeError):
         return str(k).strip()
 
+
 def merge_all(
-        jobs_dict: dict, applicants_dict: dict, prospects_df: pd.DataFrame
+    jobs_dict: dict, applicants_dict: dict, prospects_df: pd.DataFrame
 ) -> pd.DataFrame:
     merged_rows = []
 

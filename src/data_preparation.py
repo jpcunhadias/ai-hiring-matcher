@@ -33,9 +33,7 @@ def build_pipeline(cat_features: list) -> Pipeline:
         transformers=[("cat", OneHotEncoder(handle_unknown="ignore"), cat_features)]
     )
 
-    model = XGBClassifier(
-        use_label_encoder=False, eval_metric="logloss", random_state=42
-    )
+    model = XGBClassifier(eval_metric="logloss", random_state=42)
 
     pipeline = Pipeline(steps=[("preprocessor", preprocessor), ("classifier", model)])
 

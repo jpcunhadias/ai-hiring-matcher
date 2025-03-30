@@ -11,3 +11,4 @@ lint:
 # Corrige automaticamente com ruff
 format:
 	ruff check . --fix
+	ruff format .

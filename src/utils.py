@@ -18,6 +18,15 @@ s3 = boto3.client(
 )
 
 
+def load_df_from_s3(key: str) -> pd.DataFrame:
+    """
+    Lê um arquivo CSV do S3 e retorna como DataFrame.
+    """
+    response = s3.get_object(Bucket=BUCKET, Key=key)
+    content = response["Body"].read().decode("utf-8")
+    return pd.read_csv(StringIO(content))
+
+
 def load_model_from_s3(s3_path: str):
     """
     Carrega um modelo .pkl armazenado no S3.
