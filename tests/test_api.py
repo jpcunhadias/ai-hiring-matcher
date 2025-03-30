@@ -1,9 +1,15 @@
+import os
+import pytest
 from fastapi.testclient import TestClient
 from src.api import app
 
 client = TestClient(app)
 
 
+@pytest.mark.skipif(
+    not all([os.getenv("AWS_ACCESS_KEY_ID"), os.getenv("AWS_SECRET_ACCESS_KEY")]),
+    reason="Credenciais AWS não encontradas",
+)
 def test_predict_endpoint():
     payload = {
         "nivel_academico": "Ensino Superior Completo",

@@ -1,11 +1,10 @@
-import joblib
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
+from sklearn.model_selection import train_test_split
 
 from src.data_preparation import build_pipeline, get_categorical_features
 from src.load_data import load_and_merge_data
-from src.utils import save_df_to_s3, save_model_to_s3
+from src.utils import save_df_to_s3, save_model_to_s3, logger
 
 
 def create_target_variable(df: pd.DataFrame) -> pd.DataFrame:
@@ -30,6 +29,7 @@ def create_target_variable(df: pd.DataFrame) -> pd.DataFrame:
         "Documentação Cooperado",
     ]
 
+    logger.info("Filtrando dataset e criando coluna target...")
     df = df[~df["situacao"].isin(valores_excluir)].copy()
     df["target"] = df["situacao"].apply(lambda x: 1 if x in valores_sucesso else 0)
 
@@ -44,10 +44,13 @@ def create_target_variable(df: pd.DataFrame) -> pd.DataFrame:
         "target",
     ]
 
+    logger.info("Target criada. Total de amostras: %d", len(df))
     return df[selected_columns]
 
 
 def preprocess_and_train(df: pd.DataFrame):
+    logger.info("Iniciando treinamento do modelo...")
+
     X = df.drop(columns=["target"])
     y = df["target"]
 
@@ -61,12 +64,15 @@ def preprocess_and_train(df: pd.DataFrame):
     pipeline.fit(X_train, y_train)
     y_pred = pipeline.predict(X_test)
 
-    print(classification_report(y_test, y_pred))
+    logger.info("Avaliação do modelo:")
+    logger.info("\n%s", classification_report(y_test, y_pred))
 
     return pipeline
 
 
 if __name__ == "__main__":
+    logger.info("Pipeline de modelagem iniciado.")
+
     # 1. Carrega e unifica os dados
     merged_df = load_and_merge_data(save=False)
 
@@ -81,3 +87,5 @@ if __name__ == "__main__":
 
     # 5. Salva modelo no S3
     save_model_to_s3(model, "models/modelo_priorizacao_xgb.pkl")
+
+    logger.info("Pipeline finalizado com sucesso.")

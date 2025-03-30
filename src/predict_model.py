@@ -1,28 +1,26 @@
-import joblib
 import pandas as pd
 
-MODEL_PATH = "models/modelo_priorizacao_xgb.pkl"
+from src.utils import logger, load_model_from_s3
 
 
-def load_model(path=MODEL_PATH):
-    return joblib.load(path)
-
-
-def predict_proba(model, df_input: pd.DataFrame, top_n=5) -> pd.DataFrame:
+def load_model(path: str = "models/modelo_priorizacao_xgb.pkl"):
     """
-    Recebe um DataFrame com candidatos e retorna os top_n com maior probabilidade de contratação.
+    Carrega o modelo treinado a partir do S3.
     """
-    df_input = df_input.copy()
+    logger.info("Carregando modelo a partir de: %s", path)
+    model = load_model_from_s3(path)
+    logger.info("Modelo carregado com sucesso.")
+    return model
 
-    # Remove target se existir
-    if "target" in df_input.columns:
-        df_input = df_input.drop(columns=["target"])
 
-    # Predição de probabilidade da classe positiva
-    probs = model.predict_proba(df_input)[:, 1]
-    df_input["prob_contratacao"] = probs
+def predict_proba(model, df: pd.DataFrame, top_n: int = 5) -> pd.DataFrame:
+    """
+    Retorna as probabilidades de contratação para os candidatos.
+    """
+    logger.info("Realizando predições de probabilidade...")
+    proba = model.predict_proba(df)[:, 1]  # Probabilidade da classe positiva
+    df_result = df.copy()
+    df_result["prob_contratacao"] = proba
 
-    # Ordena por maior probabilidade
-    df_input = df_input.sort_values(by="prob_contratacao", ascending=False)
-
-    return df_input.head(top_n)
+    logger.info("Ordenando candidatos pela probabilidade...")
+    return df_result.sort_values(by="prob_contratacao", ascending=False).head(top_n)

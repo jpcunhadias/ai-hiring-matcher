@@ -1,6 +1,6 @@
 # AI Hiring Matcher
 
-Este projeto foi desenvolvido para o Datathon de Machine Learning Engineering com o objetivo de priorizar candidatos com maior probabilidade de contratacao. A solução envolve um modelo preditivo de classificação, uma API em FastAPI, e empacotamento via Docker, além de testes automatizados.
+Este projeto foi desenvolvido para o Datathon de Machine Learning Engineering com o objetivo de priorizar candidatos com maior probabilidade de contratação. A solução envolve um modelo preditivo de classificação, uma API em FastAPI, empacotamento via Docker, integração com AWS S3, além de testes automatizados e logging estruturado.
 
 ---
 
@@ -11,7 +11,8 @@ Desenvolver uma solução de Machine Learning Engineering que:
 - Analise dados históricos de processos seletivos
 - Classifique candidatos de acordo com sua chance de contratação
 - Ofereça uma API que possa ser consultada por outros sistemas
-- Seja facilmente testável, reproduzível e containerizada
+- Seja facilmente testável, reprodutível e containerizada
+- Armazene os dados e o modelo em ambiente remoto (S3)
 
 ---
 
@@ -23,6 +24,8 @@ Desenvolver uma solução de Machine Learning Engineering que:
 - Pytest
 - Docker
 - Joblib
+- AWS S3
+- Logging com módulo `logging`
 
 ---
 
@@ -32,10 +35,6 @@ Desenvolver uma solução de Machine Learning Engineering que:
 .
 ├── Dockerfile
 ├── README.md
-├── data/
-│   └── df_model.csv              # Base com variável target
-├── models/
-│   └── modelo_priorizacao_xgb.pkl
 ├── notebooks/
 │   ├── eda.ipynb
 │   ├── modeling_baseline.ipynb
@@ -45,13 +44,17 @@ Desenvolver uma solução de Machine Learning Engineering que:
 │   ├── __init__.py
 │   ├── api.py                    # FastAPI
 │   ├── data_preparation.py       # Pipeline de pré-processamento
-│   ├── load_data.py              # (opcional)
+│   ├── load_data.py              # Carregamento de dados do S3
 │   ├── predict_model.py          # Predição com modelo treinado
-│   └── train_model.py            # Treinamento do modelo
-└── tests/
-    ├── test_api.py
-    └── test_preprocessing.py
+│   ├── train_model.py            # Treinamento completo com persistência no S3
+│   └── utils.py                  # Utilitários para salvar/carregar S3 e logging
+├── tests/
+│   ├── test_api.py
+│   └── test_preprocessing.py
+└── Makefile                      # Comandos automatizados
 ```
+
+> **Observação:** os arquivos de dados e modelos são salvos no S3 e não estão presentes localmente.
 
 ---
 
@@ -64,7 +67,21 @@ git clone https://github.com/seu-usuario/ai-hiring-matcher.git
 cd ai-hiring-matcher
 ```
 
-### 2. Criar ambiente virtual e instalar dependências
+### 2. Configurar variáveis de ambiente
+
+Crie um arquivo `.env` com as seguintes variáveis:
+
+```
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-2
+S3_BUCKET_NAME=ml-recruitment-data-joaopd
+RAW_PATH=data/raw/
+PROCESSED_PATH=data/processed/
+MODELS_PATH=models/
+```
+
+### 3. Criar ambiente virtual e instalar dependências
 
 ```bash
 python -m venv venv
@@ -72,13 +89,17 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Treinar o modelo
+### 4. Executar pipeline de dados e treino do modelo
 
 ```bash
 PYTHONPATH=. python src/train_model.py
 ```
 
-Isso irá gerar o arquivo `modelo_priorizacao_xgb.pkl` na pasta `models/`.
+Isso irá:
+- Carregar os dados brutos do S3
+- Criar a variável target
+- Treinar o modelo
+- Salvar o modelo e dados processados de volta no S3
 
 ---
 
@@ -87,7 +108,15 @@ Isso irá gerar o arquivo `modelo_priorizacao_xgb.pkl` na pasta `models/`.
 Execute os testes automatizados com:
 
 ```bash
-PYTHONPATH=. pytest tests/
+make test
+```
+
+---
+
+## Linting e formatação
+
+```bash
+make lint
 ```
 
 ---
@@ -103,7 +132,7 @@ docker build -t ai-hiring-matcher .
 ### 2. Executar o container
 
 ```bash
-docker run -p 8000:8000 ai-hiring-matcher
+docker run -p 8000:8000 --env-file .env ai-hiring-matcher
 ```
 
 A API estará disponível em:  
@@ -145,27 +174,27 @@ A API estará disponível em:
 
 ## Modelo e métricas
 
-O modelo utilizado foi um XGBoost com pré-processamento baseado em codificação categórica (OneHotEncoder).  
+O modelo utilizado foi um XGBoost com codificação categórica via `OneHotEncoder`.
 
-As principais métricas na base de validação foram:
+As principais métricas de avaliação:
 
 - **Accuracy:** ~0.75
 - **Precision (classe positiva):** ~0.50
 - **Recall (classe positiva):** ~0.54
 - **F1-score (classe positiva):** ~0.52
 
-O desempenho pode ser melhorado com mais dados ou novas features.
-
 ---
 
 ## Conclusão
 
-A solução entregue atende todos os critérios propostos pelo desafio:
+A solução entregue atende aos critérios do desafio:
 
-- Pipeline de modelagem funcional e modularizado
-- API documentada e testada
-- Container Docker funcional
-- Testes automatizados
-- Documentação clara e reprodutível
+- Pipeline modularizado com integração ao S3
+- Modelo preditivo funcional
+- API REST com FastAPI e documentação via Swagger
+- Testes automatizados com Pytest
+- Logging estruturado com `logging`
+- Empacotamento com Docker
+- Automação com Makefile
 
 ---

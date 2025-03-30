@@ -1,5 +1,4 @@
 import os
-from io import StringIO
 
 import boto3
 import pandas as pd
@@ -41,13 +40,3 @@ def build_pipeline(cat_features: list) -> Pipeline:
     pipeline = Pipeline(steps=[("preprocessor", preprocessor), ("classifier", model)])
 
     return pipeline
-
-
-def save_df_to_s3(df, filename="df_model.csv"):
-    buffer = StringIO()
-    df.to_csv(buffer, index=False)
-    buffer.seek(0)
-    s3.put_object(
-        Bucket=BUCKET, Key=f"{PROCESSED_PATH}{filename}", Body=buffer.getvalue()
-    )
-    print(f"Arquivo salvo em s3://{BUCKET}/{PROCESSED_PATH}{filename}")

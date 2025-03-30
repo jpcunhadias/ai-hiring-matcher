@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from src.predict_model import load_model, predict_proba
+from src.utils import logger
 
 app = FastAPI(
     title="Prioriza Candidatos",
@@ -26,17 +27,19 @@ class Candidate(BaseModel):
 
 @app.get("/")
 def read_root():
+    logger.info("Rota raiz acessada.")
     return {"message": "API de priorização de candidatos está no ar!"}
 
 
 @app.post("/predict")
 def predict(data: Candidate):
-    # Converte o input para DataFrame
-    df = pd.DataFrame([data.model_dump()])
-
-    # Faz a predição
-    result_df = predict_proba(model, df, top_n=1)
-
-    # Retorna a probabilidade do primeiro (e único) candidato
-    prob = result_df.iloc[0]["prob_contratacao"]
-    return {"prob_contratacao": round(float(prob), 8)}
+    logger.info("Recebida requisição para /predict: %s", data.model_dump())
+    try:
+        df = pd.DataFrame([data.model_dump()])
+        result_df = predict_proba(model, df, top_n=1)
+        prob = result_df.iloc[0]["prob_contratacao"]
+        logger.info("Predição realizada com sucesso: %.5f", prob)
+        return {"prob_contratacao": round(float(prob), 8)}
+    except Exception as e:
+        logger.error("Erro durante a predição: %s", str(e))
+        raise
