@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: ai-hiring-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - RAW_PATH=${RAW_PATH}
+    command: uvicorn src.api:app --host 0.0.0.0 --port 8000
+
+  monitor:
+    build: .
+    container_name: ai-hiring-monitor
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONPATH=/app
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - RAW_PATH=${RAW_PATH}
+    command: streamlit run src/monitor_app.py --server.port 8501 --server.address 0.0.0.0

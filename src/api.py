@@ -11,7 +11,6 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Carrega modelo na inicialização da API
 model = load_model()
 
 
