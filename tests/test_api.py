@@ -3,6 +3,7 @@ from src.api import app
 
 client = TestClient(app)
 
+
 def test_predict_endpoint():
     payload = {
         "nivel_academico": "Ensino Superior Completo",
@@ -11,7 +12,7 @@ def test_predict_endpoint():
         "area_atuacao": "Ti - Projetos",
         "nivel_profissional": "Sênior",
         "sap": "Não",
-        "cliente": "Gonzalez And Sons"
+        "cliente": "Gonzalez And Sons",
     }
 
     response = client.post("/predict", json=payload)

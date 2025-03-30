@@ -11,7 +11,7 @@ s3 = boto3.client(
     "s3",
     aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
     aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-    region_name=os.getenv("AWS_DEFAULT_REGION")
+    region_name=os.getenv("AWS_DEFAULT_REGION"),
 )
 
 
@@ -22,4 +22,15 @@ def save_df_to_s3(df: pd.DataFrame, key: str):
     csv_buffer = StringIO()
     df.to_csv(csv_buffer, index=False)
     s3.put_object(Bucket=BUCKET, Key=key, Body=csv_buffer.getvalue())
-    print(f"✔️ DataFrame salvo no S3 em: s3://{BUCKET}/{key}")
+    print(f"DataFrame salvo no S3 em: s3://{BUCKET}/{key}")
+
+
+def save_model_to_s3(model, key: str):
+    """
+    Salva um modelo no S3.
+    """
+    buffer = StringIO()
+    model.save_model(buffer)
+    buffer.seek(0)
+    s3.put_object(Bucket=BUCKET, Key=key, Body=buffer.getvalue())
+    print(f"Modelo salvo no S3 em: s3://{BUCKET}/{key}")
