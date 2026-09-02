@@ -1,44 +1,48 @@
-import pandas as pd
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from src.predict_model import load_model, predict_proba
-from src.utils import logger
+from src.predict_model import load_artifacts, match_resume
+from src.utils import log_request, logger
 
 app = FastAPI(
-    title="Prioriza Candidatos",
-    description="API para prever probabilidade de contratação de candidatos",
-    version="1.0.0",
+    title="AI Hiring Matcher",
+    description="Ranks a candidate resume against a catalog of job descriptions and "
+    "scores each match's probability.",
+    version="2.0.0",
 )
 
-model = load_model()
+_model, _vocabulary, _catalog = load_artifacts()
 
 
-class Candidate(BaseModel):
-    nivel_academico: str
-    ingles: str
-    espanhol: str
-    area_atuacao: str
-    nivel_profissional: str
-    sap: str
-    cliente: str
+class ResumeRequest(BaseModel):
+    resume: str
+    top_n: int = 5
 
 
 @app.get("/")
 def read_root():
     logger.info("Rota raiz acessada.")
-    return {"message": "API de priorização de candidatos está no ar!"}
+    return {"message": "AI Hiring Matcher API está no ar!"}
 
 
-@app.post("/predict")
-def predict(data: Candidate):
-    logger.info("Recebida requisição para /predict: %s", data.model_dump())
+@app.post("/match")
+def match(request: ResumeRequest):
+    logger.info("Recebida requisição para /match (top_n=%d)", request.top_n)
     try:
-        df = pd.DataFrame([data.model_dump()])
-        result_df = predict_proba(model, df, top_n=1)
-        prob = result_df.iloc[0]["prob_contratacao"]
-        logger.info("Predição realizada com sucesso: %.5f", prob)
-        return {"prob_contratacao": round(float(prob), 8)}
+        ranked = match_resume(request.resume, _model, _vocabulary, _catalog, top_n=request.top_n)
+        top = ranked.iloc[0]
+
+        log_request(
+            {
+                "resume_length": len(request.resume),
+                "cosine_similarity": float(top["similarity"]),
+                "skill_overlap": float(top["skill_overlap"]),
+                "best_match_proba": float(top["best_match_proba"]),
+            }
+        )
+
+        logger.info("Match concluído. Melhor vaga: %s", top["job_role"])
+        return {"matches": ranked.to_dict(orient="records")}
     except Exception as e:
-        logger.error("Erro durante a predição: %s", str(e))
+        logger.error("Erro durante o matching: %s", str(e))
         raise

@@ -8,7 +8,7 @@ dist/
 build/
 .eggs/
 
-# Virtual environments
+# uv / virtual environments
 .env
 .venv
 env/
@@ -26,13 +26,24 @@ venv/
 # Modelos
 *.pkl
 *.joblib
+models/
 
-# Dados
-data/raw/
+# Dados: data/external/ (the Kaggle source CSV) is DVC-tracked, so the CSV itself
+# is ignored and only the .dvc pointer file stays in git (DVC manages this ignore
+# entry itself). data/raw/ and datasets/ are covered by ~/.gitignore_global for
+# every project on this machine, so this repo deliberately keeps the dataset under
+# data/external/ instead — the more correct cookiecutter-style home anyway for data
+# that came from a third-party source rather than this project's own pipeline.
 data/processed/
+data/logs/
 
-# Logs
-logs/
+# MLflow local tracking store
+mlruns/
+mlflow.db
+
+# Relatórios gerados (fairness audit, drift)
+reports/
+drift_report.html
 
 # Sistema
 .DS_Store

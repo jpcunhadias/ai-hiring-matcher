@@ -1,2 +1,51 @@
+[project]
+name = "ai-hiring-matcher"
+version = "2.0.0"
+description = "Semantic resume-to-job matcher with a fairness audit and drift monitoring, built on uv."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "evidently==0.4.33",
+    "fastapi>=0.141.1",
+    "joblib>=1.6.0",
+    "mlflow>=3.15.2",
+    "numpy>=2.5.2",
+    "pandas>=2.3.3",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.3",
+    "scikit-learn>=1.9.0",
+    "sentence-transformers>=6.0.1",
+    "streamlit>=1.63.0",
+    "tabulate>=0.10.0",
+    "uvicorn[standard]>=0.52.4",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "dvc[s3]>=3.67.1",
+    "httpx>=0.28.1",
+    "ipykernel>=7.3.0",
+    "mypy>=2.3.1",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "ruff>=0.16.5",
+]
+
 [tool.ruff]
 exclude = ["notebooks/"]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+exclude = ["notebooks/"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "--disable-warnings"

@@ -4,3 +4,7 @@ __pycache__/
 .env
 data/
 models/
+mlruns/
+reports/
+.git/
+notebooks/
