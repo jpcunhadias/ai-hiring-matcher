@@ -1,182 +1,195 @@
 # AI Hiring Matcher
 
-Este projeto começou como a entrega de um Datathon de Machine Learning
-Engineering: um classificador XGBoost sobre 7 campos categóricos, sem nenhum
-sinal de texto, hospedado no AWS S3. Funcionava, mas nunca "casava" nada — o
-nome prometia um *matcher* e entregava um classificador binário cego à vaga.
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![uv](https://img.shields.io/badge/managed%20with-uv-de5fe9)
 
-Esta é a reconstrução (v2): um matcher semântico de verdade — que ranqueia o
-currículo contra um catálogo de vagas por similaridade de embeddings —, uma
-auditoria de fairness que **encontrou um viés real e severo embutido no
-próprio dataset**, monitoramento de drift que compara tráfego real (não uma
-reamostragem de si mesmo), e todo o ambiente reconstruído em `uv`, rodando
-localmente sem nenhuma credencial externa.
+A semantic resume-to-job matcher with an automated fairness audit and
+drift monitoring, built on a fully local MLOps stack (`uv`, DVC, MLflow,
+Evidently) — no cloud account required to run it.
 
----
+Given a resume, it ranks a catalog of job descriptions by embedding
+similarity, scores each match with a classifier, and — while validating
+that classifier's training label — surfaces a severe, quantifiable gender
+bias baked into the dataset itself. That finding, and how the model is
+deliberately designed not to reproduce it, is the core of this project.
 
-## O dataset
+This started as a Datathon submission: a plain classifier over 7
+categorical fields, with no text signal, hosted on AWS S3 because the
+course was an AWS partner. This is the rebuild — a real retrieval-based
+matcher instead of a blind categorical classifier, and an honest audit of
+the data it's trained on.
 
-[`job_applicant_dataset.csv`](data/external/job_applicant_dataset.csv) (10.000
-linhas, via Kaggle) traz `Resume` e `Job Description` em texto livre, um
-rótulo binário `Best Match`, e colunas demográficas sintéticas (`Age`,
-`Gender`, `Race`, `Ethnicity`). Só existem **51 descrições de vaga únicas** —
-ou seja, este é um problema de *retrieval em conjunto fechado* (ranquear
-entre 51 vagas conhecidas), não generalização para vagas nunca vistas.
+## Contents
 
-## O achado principal: o rótulo do dataset é enviesado por gênero
+- [Features](#features)
+- [The dataset](#the-dataset)
+- [Key finding: the label is gender-biased](#key-finding-the-label-is-gender-biased)
+- [How the matcher works](#how-the-matcher-works)
+- [Drift monitoring](#drift-monitoring)
+- [Stack](#stack)
+- [Quick start](#quick-start)
+- [API](#api)
+- [Project structure](#project-structure)
+- [Testing & quality](#testing--quality)
+- [Limitations](#limitations)
 
-Antes de confiar em `Best Match` como alvo de treino, a auditoria de fairness
-([src/fairness_audit.py](src/fairness_audit.py)) mede a taxa de match por
-grupo demográfico **direto no dado bruto, sem nenhum modelo envolvido**. O
-resultado:
+## Features
 
-- Agregado: `Best Match = 1` em **61,3%** das linhas de homens vs. **35,4%**
-  das linhas de mulheres.
-- Por vaga, o efeito é muito mais extremo e **não é uniforme** — em algumas
-  vagas favorece homens, em outras mulheres, com gaps de até **89 pontos
-  percentuais**:
+- **Semantic retrieval matcher** — resumes ranked against a 51-job catalog
+  by `sentence-transformers` embedding similarity, not keyword matching.
+- **Fairness audit** — checks the training label itself for demographic
+  skew before trusting it, independent of any model.
+- **Drift monitoring** — compares real logged requests against a training
+  reference built the same way, with a threshold alert and a minimum
+  sample-size guard.
+- **Fully local MLOps stack** — `uv` for dependencies, DVC for data
+  versioning, MLflow for experiment tracking, all with local defaults and
+  zero required cloud credentials.
+- **FastAPI service + Docker**, with a Streamlit drift dashboard.
 
-| Vaga | Taxa (mulheres) | Taxa (homens) | Gap |
+## The dataset
+
+[`job_applicant_dataset.csv`](data/external/job_applicant_dataset.csv)
+(10,000 rows, [via Kaggle](https://www.kaggle.com/datasets/surendra365/recruitement-dataset))
+provides free-text `Resume` and `Job Description` pairs, a binary
+`Best Match` label, and demographic columns (`Age`, `Gender`, `Race`,
+`Ethnicity`). Only **51 unique job descriptions** exist — so this is a
+*closed-set retrieval* problem (ranking among 51 known jobs), not
+generalization to unseen postings.
+
+The dataset's own Kaggle card describes it as material for "HR Analytics &
+Hiring Bias Studies" and for analyzing hiring bias by age, gender, or
+ethnicity — a bias finding here is the dataset's stated purpose, not a
+surprise. What *is* notable: the same card defines `Best Match` as
+reflecting "qualifications and experience." The next section shows that
+definition doesn't hold up.
+
+## Key finding: the label is gender-biased
+
+Before trusting `Best Match` as a training target, the fairness audit
+([src/fairness_audit.py](src/fairness_audit.py)) checks its selection rate
+by demographic group, directly on the raw data, with no model involved:
+
+- **Aggregate:** `Best Match = 1` for **61.3%** of male rows vs. **35.4%**
+  of female rows.
+- **Per job role**, the effect is far more extreme and **not uniform** —
+  some roles favor men, others favor women, with gaps up to **89
+  percentage points**:
+
+| Job role | Female rate | Male rate | Gap |
 |---|---:|---:|---:|
-| Journalist | 6,2% | 95,6% | +89,4 pp |
-| Financial Analyst | 10,0% | 95,7% | +85,7 pp |
-| Content Writer | 91,7% | 6,6% | −85,1 pp |
-| Psychologist | 92,5% | 8,3% | −84,2 pp |
+| Journalist | 6.2% | 95.6% | +89.4 pp |
+| Financial Analyst | 10.0% | 95.7% | +85.7 pp |
+| Content Writer | 91.7% | 6.6% | −85.1 pp |
+| Psychologist | 92.5% | 8.3% | −84.2 pp |
 
-(tabela completa gerada em `reports/fairness_report.md` a cada treino)
+(full table generated in `reports/fairness_report.md` on every training run)
 
-Nem idade, raça, etnia, nível de experiência ou certificações mostram sinal
-comparável — o efeito é especificamente de gênero, e específico por vaga.
-Olhando para todos os 102 grupos `(Job Role, Gender)`, nenhum é
-perfeitamente determinístico (0% ou 100%), mas as taxas são fortemente
-**bimodais**: 53 grupos ficam em ≤20%, 49 em ≥80%, e **nenhum** cai entre
-esses dois polos (calculado em [src/fairness_audit.py](src/fairness_audit.py)
-via `gender_rate_bimodality`, reproduzido a cada `make train`). Isso é a
-assinatura de `Best Match` tendo sido amostrado como `Bernoulli(p)` por
-grupo, com `p` fixado perto de 0,1 ou 0,9 — não ruído incidental, e não uma
-regra determinística fixa.
+Across all 102 `(Job Role, Gender)` groups, none is perfectly deterministic
+(rate = 0% or 100%), but the rates are sharply **bimodal**: 53 groups sit at
+≤20%, 49 at ≥80%, and **none** fall in between — the signature of
+`Best Match` having been sampled as `Bernoulli(p)` per group, with `p`
+fixed near 0.1 or 0.9. Age, race, ethnicity, experience level, and
+certifications show no comparable signal; this is specific to gender, and
+specific to role. Correlation between `Best Match` and the actual
+similarity features (`cosine_similarity`, `skill_overlap`) is close to
+zero — the bimodal group pattern dominates the label, not qualification.
 
-A [ficha do dataset no Kaggle](https://www.kaggle.com/datasets/surendra365/recruitement-dataset)
-confirma o contexto: ele é descrito explicitamente como material para
-"HR Analytics & Hiring Bias Studies" e para "analisar tendências e vieses
-na contratação com base em idade, gênero ou etnia" — então a existência de
-viés aqui não é surpresa, é o propósito declarado do dataset. O que *é*
-notável: a mesma ficha define `Best Match` como "indicando o quão bem o
-candidato corresponde à vaga **com base em qualificações e experiência**"
-— e isso não bate com o que os dados mostram. A correlação entre
-`Best Match` e as features reais de similaridade (`cosine_similarity`,
-`skill_overlap`) é praticamente zero; o padrão bimodal por grupo é quem
-domina o rótulo, não qualificação. Não dá para saber, só pelos dados, se
-essa divergência entre a documentação e o gerador foi intencional — mas o
-achado prático vale de qualquer forma: **audite o rótulo antes de treinar
-em cima dele**, mesmo quando a fonte descreve o que ele deveria significar.
+**Direct design consequence:** the `Best Match` classifier below **never
+receives Gender/Race/Ethnicity as a feature** — even though it's by far the
+strongest signal for the label. Training on a protected attribute to
+predict "match" would reproduce exactly the bias this audit exists to
+catch. The cost of that choice shows up in the next section.
 
-**Decisão de design direta consequência disso:** o classificador de
-`Best Match` (abaixo) **nunca recebe Gender/Race/Ethnicity como feature** —
-mesmo sendo, de longe, o sinal mais forte do rótulo. Usar um atributo
-protegido para prever "match" seria reproduzir exatamente o viés que esta
-auditoria existe para pegar. O preço dessa escolha aparece na seção seguinte.
+## How the matcher works
 
-## O matcher
+[src/embeddings.py](src/embeddings.py) embeds resumes and job descriptions
+with `sentence-transformers` (`all-MiniLM-L6-v2`, local, no API key).
+[src/matcher.py](src/matcher.py) ranks the 51 catalog jobs by cosine
+similarity — this is the actual matching logic.
 
-[src/embeddings.py](src/embeddings.py) usa `sentence-transformers`
-(`all-MiniLM-L6-v2`, local, sem chave de API) para embutir currículos e
-descrições de vaga. [src/matcher.py](src/matcher.py) ranqueia as 51 vagas do
-catálogo por similaridade de cosseno — isso é o "matcher" de fato.
+Evaluated as retrieval (does a resume recover its own `Job Roles` among the
+51 known jobs?):
 
-Avaliado como retrieval (o currículo recupera sua própria `Job Roles` entre
-as 51 vagas conhecidas):
-
-| Métrica | Valor |
+| Metric | Value |
 |---|---:|
-| Recall@1 | 63,1% |
-| Recall@5 | 88,2% |
-| MRR | 0,745 |
+| Recall@1 | 63.1% |
+| Recall@5 | 88.2% |
+| MRR | 0.745 |
 
-Isso funciona bem porque cada currículo foi gerado com um vocabulário de
-skills que reflete a vaga alvo — similaridade textual recupera essa vaga na
-maior parte das vezes.
+This works well because each resume was generated with a skill vocabulary
+that reflects its target role — text similarity recovers that role most of
+the time.
 
-### O classificador de Best Match: honesto sobre seus limites
+### The Best Match classifier: honest about its limits
 
-[src/train_model.py](src/train_model.py) treina uma regressão logística sobre
-`[cosine_similarity, skill_overlap]` → `Best Match`. A correlação entre essas
-features e o rótulo é essencialmente zero (~ -0,02 e ~0,00) — porque, como o
-achado acima mostra, `Best Match` é dominado por Gender, não por similaridade
-semântica real. Resultado: F1 ~0,08 na classe positiva, pouco acima do acaso.
+[src/train_model.py](src/train_model.py) trains a logistic regression on
+`[cosine_similarity, skill_overlap]` → `Best Match`. Correlation between
+those features and the label is close to zero (~−0.02 and ~0.00) — because,
+per the finding above, `Best Match` is dominated by gender, not genuine
+semantic fit. Result: F1 ≈ 0.08 on the positive class, barely above chance.
 
-Isso não é um bug para "consertar" ajustando hiperparâmetros — é o resultado
-esperado de deliberadamente não alimentar o modelo com o atributo que mais
-prediz o rótulo. O `skill_overlap` é calculado por extração baseada em regex
-sobre o formato template dos currículos (`src/data_preparation.py`), com
-correspondência de palavra inteira — verificado contra as 10.000 linhas antes
-de virar código.
+This isn't a bug to fix by tuning hyperparameters — it's the expected
+result of deliberately withholding the attribute that most predicts the
+label. `skill_overlap` itself is computed via regex extraction over the
+resumes' template format ([src/data_preparation.py](src/data_preparation.py)),
+with whole-word matching, verified against all 10,000 rows.
 
-## Monitoramento de drift (batch-live, não só sob demanda)
+## Drift monitoring
 
-[src/drift_monitor.py](src/drift_monitor.py) compara requisições reais
-logadas em `data/logs/requests.jsonl` (cada chamada a `/match` grava suas
-próprias features) contra uma referência de treino — construída da **mesma
-forma** que uma requisição real (top-1 do catálogo, não o pareamento
-arbitrário do dataset; comparar essas duas distribuições diferentes já gerou
-um alerta falso de 75-100% de drift antes desse ajuste). Evidently roda o
-teste estatístico por coluna; abaixo de `DRIFT_MIN_WINDOW_SIZE` (padrão 100)
-requisições, o check se recusa a rodar — testes estatísticos em amostras
-pequenas são ruidosos por natureza (uma janela de 30 requisições já gerou
-100% de "drift" só por variância amostral).
+[src/drift_monitor.py](src/drift_monitor.py) compares real requests logged
+to `data/logs/requests.jsonl` (every `/match` call records its own
+features) against a training-time reference built the same way a live
+request is scored — top-1 catalog match, not the dataset's arbitrary
+resume/job pairing. Evidently runs a per-column statistical test; below
+`DRIFT_MIN_WINDOW_SIZE` (default 100) logged requests, the check refuses to
+run, since drift tests are unreliable on small samples.
 
 ```bash
-make drift-check   # roda uma vez
-make monitor       # dashboard Streamlit
+make drift-check   # run once
+make monitor       # Streamlit dashboard
 ```
 
-Pensado para rodar em um agendamento (cron/systemd timer no servidor), não
-apenas manualmente.
+Meant to run on a schedule (cron/systemd timer), not just manually.
 
----
+## Stack
 
-## Stack e por que não tem AWS
+Everything runs on `uv` — no manual `pip`/`venv`, no `requirements.txt`.
+Data ([`data/external/`](data/external)) is versioned with
+[DVC](https://dvc.org), using a local remote by default, so the project
+works fully offline with zero credentials.
 
-Tudo roda com `uv` — sem `pip`/`venv` manual, sem `requirements.txt`. Dados
-(`data/external/`) são versionados com [DVC](https://dvc.org), com um remote
-local (`~/.local/share/dvc-storage/`) por padrão — funciona 100% offline, sem
-credencial nenhuma.
+- **MLflow** tracks experiments to a local sqlite database
+  (`sqlite:///mlflow.db`) by default. Point it at any remote tracking
+  server via `MLFLOW_TRACKING_URI` in `.env`.
+- **DVC** uses a local remote by default. Swap in any DVC-supported remote
+  (S3, MinIO, GCS, Azure...) via `dvc remote add`/`dvc remote modify`.
 
-O AWS S3 da v1 só existia porque a pós-graduação era parceira da AWS. O
-ambiente real da equipe é um servidor Ubuntu compartilhado (MLflow + MySQL +
-Postgres + MinIO, documentado em `~/Desktop/Projects/server-onboarding`,
-acessado via Tailscale) — mas esse servidor está sendo fisicamente
-transportado no momento desta reconstrução, então tudo aqui roda local por
-padrão:
+See [`.env.example`](.env.example) for all configurable environment
+variables.
 
-- **MLflow**: `sqlite:///mlflow.db` local por padrão. Para apontar para o
-  MLflow do servidor quando ele voltar: `MLFLOW_TRACKING_URI=http://<ip-tailscale>:5000`
-  no `.env`.
-- **DVC**: remote local por padrão. Para apontar para o MinIO do servidor:
-  `dvc remote add -d server-storage s3://<bucket> --endpointurl http://<ip-tailscale>:9000`
-  (ver `server-onboarding` para credenciais).
-
-## Como rodar
+## Quick start
 
 ```bash
-uv sync                        # instala tudo (runtime + dev)
-make train                     # treina: embeddings, classificador, catálogo,
-                                # auditoria de fairness, referência de drift
-make serve                     # sobe a API em http://localhost:8000
+uv sync                        # install everything (runtime + dev)
+make train                     # embeddings, classifier, catalog,
+                                # fairness audit, drift reference
+make serve                     # API at http://localhost:8000
 make test                      # pytest
 make lint                      # ruff + mypy
 ```
 
-### Docker (sem credencial nenhuma)
+### Docker (no credentials needed)
 
 ```bash
 docker compose up
 ```
 
-`models/` e `data/` são montados como volumes — treine localmente
-(`make train`) antes de subir o container pela primeira vez.
+`models/` and `data/` are mounted as volumes — train locally (`make train`)
+before bringing the container up for the first time.
 
-### API
+## API
 
 ```bash
 curl -X POST http://localhost:8000/match \
@@ -194,38 +207,51 @@ curl -X POST http://localhost:8000/match \
 }
 ```
 
-(saída real, gerada a partir do modelo treinado neste repositório)
+(real output, generated from the model trained in this repository)
 
----
-
-## Estrutura
+## Project structure
 
 ```
 .
 ├── data/
-│   ├── external/           # dataset Kaggle, versionado com DVC
-│   ├── processed/          # referência de drift (gerado por make train)
-│   └── logs/                # requisições reais logadas (gerado em runtime)
-├── models/                  # classificador, vocabulário de skills, catálogo (gerado)
-├── reports/                  # auditoria de fairness (gerado por make train)
+│   ├── external/            # Kaggle dataset, versioned with DVC
+│   ├── processed/           # drift reference (generated by `make train`)
+│   └── logs/                 # real requests logged at runtime
+├── models/                   # classifier, skill vocabulary, catalog (generated)
+├── reports/                  # fairness audit (generated by `make train`)
 ├── src/
-│   ├── data_preparation.py   # parsing de currículo, extração de skills, split
-│   ├── embeddings.py         # wrapper sentence-transformers
-│   ├── matcher.py            # catálogo de vagas, ranking, métricas de retrieval
-│   ├── train_model.py        # pipeline de treino completo (MLflow + fairness + drift ref)
-│   ├── predict_model.py      # inferência: match_resume()
-│   ├── fairness_audit.py     # auditoria de viés demográfico
-│   ├── drift_monitor.py      # comparação de drift batch-live com alerta
+│   ├── data_preparation.py   # resume parsing, skill extraction, splitting
+│   ├── embeddings.py         # sentence-transformers wrapper
+│   ├── matcher.py            # job catalog, ranking, retrieval metrics
+│   ├── train_model.py        # full training pipeline (MLflow + fairness + drift ref)
+│   ├── predict_model.py      # inference: match_resume()
+│   ├── fairness_audit.py     # demographic bias audit
+│   ├── drift_monitor.py      # batch-live drift comparison with alerting
 │   ├── api.py                 # FastAPI (/match)
-│   ├── monitor_app.py         # dashboard Streamlit de drift
-│   └── utils.py                # logging, I/O local, log de requisições
+│   ├── monitor_app.py         # Streamlit drift dashboard
+│   └── utils.py                # logging, local I/O, request logging
 └── tests/
 ```
 
-## Testes e qualidade
+## Testing & quality
 
 ```bash
-make test     # pytest (26 testes)
+make test     # pytest (28 tests)
 make lint     # ruff check + mypy
 uv run pre-commit run --all-files
 ```
+
+## Limitations
+
+- **Closed-set retrieval only** — the matcher ranks among the 51 jobs seen
+  during training; it doesn't generalize to unseen job postings.
+- **The `Best Match` classifier is weak by design** — see
+  [above](#the-best-match-classifier-honest-about-its-limits). Improving
+  its F1 would require feeding it the protected attributes that actually
+  drive the label, which defeats the point of the fairness audit.
+- **Drift alerts need real traffic volume** — fewer than
+  `DRIFT_MIN_WINDOW_SIZE` logged requests, and the check won't run at all.
+
+## License
+
+[MIT](LICENSE)
