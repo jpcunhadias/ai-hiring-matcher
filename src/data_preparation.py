@@ -20,6 +20,11 @@ _RESUME_PATTERN = re.compile(
 
 
 def load_raw_data(path: Path = RAW_DATA_PATH) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Dataset não encontrado em {path}. Baixe-o do Kaggle e salve nesse caminho "
+            "(ver a seção 'Get the data' do README)."
+        )
     logger.info("Carregando dataset bruto de: %s", path)
     df = pd.read_csv(path)
     df["Best Match"] = df["Best Match"].astype(int)
