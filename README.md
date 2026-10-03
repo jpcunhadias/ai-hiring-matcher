@@ -87,6 +87,13 @@ by demographic group, directly on the raw data, with no model involved:
 
 (full table generated in `reports/fairness_report.md` on every training run)
 
+The full per-role picture — the direction flips, and a few roles show no gap at all:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/fairness-gap-by-role-dark.png">
+  <img src="docs/images/fairness-gap-by-role-light.png" alt="Dumbbell chart of the female and male Best Match rate for each of 51 job roles, sorted from most male-favored to most female-favored. In 32 roles men sit near 90% and women near 10%; in 17 the pattern reverses; in two (Legal Consultant and AI Researcher) both genders are below 10%." width="720">
+</picture>
+
 Across all 102 `(Job Role, Gender)` groups, none is perfectly deterministic
 (rate = 0% or 100%), but the rates are sharply **bimodal**: 53 groups sit at
 ≤20%, 49 at ≥80%, and **none** fall in between — the signature of
@@ -96,6 +103,11 @@ certifications show no comparable signal; this is specific to gender, and
 specific to role. Correlation between `Best Match` and the actual
 similarity features (`cosine_similarity`, `skill_overlap`) is close to
 zero — the bimodal group pattern dominates the label, not qualification.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/fairness-bimodality-dark.png">
+  <img src="docs/images/fairness-bimodality-light.png" alt="Stacked histogram of the Best Match rate of all 102 job-role and gender groups. 53 groups are at or below 20%, 49 are at or above 80%, and none fall between 20% and 80%." width="720">
+</picture>
 
 **Direct design consequence:** the `Best Match` classifier below **never
 receives Gender/Race/Ethnicity as a feature** — even though it's by far the
