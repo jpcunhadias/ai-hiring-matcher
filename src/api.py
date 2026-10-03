@@ -6,12 +6,12 @@ from src.utils import log_request, logger
 
 app = FastAPI(
     title="AI Hiring Matcher",
-    description="Ranks a candidate resume against a catalog of job descriptions and "
-    "scores each match's probability.",
+    description="Ranks a resume against a catalog of job descriptions by semantic "
+    "similarity and skill overlap.",
     version="2.0.0",
 )
 
-_model, _vocabulary, _catalog = load_artifacts()
+_vocabulary, _catalog = load_artifacts()
 
 
 class ResumeRequest(BaseModel):
@@ -29,7 +29,7 @@ def read_root():
 def match(request: ResumeRequest):
     logger.info("Received /match request (top_n=%d)", request.top_n)
     try:
-        ranked = match_resume(request.resume, _model, _vocabulary, _catalog, top_n=request.top_n)
+        ranked = match_resume(request.resume, _vocabulary, _catalog, top_n=request.top_n)
         top = ranked.iloc[0]
 
         log_request(
@@ -37,7 +37,6 @@ def match(request: ResumeRequest):
                 "resume_length": len(request.resume),
                 "cosine_similarity": float(top["similarity"]),
                 "skill_overlap": float(top["skill_overlap"]),
-                "best_match_proba": float(top["best_match_proba"]),
             }
         )
 

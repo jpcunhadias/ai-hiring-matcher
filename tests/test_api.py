@@ -4,7 +4,6 @@ from fastapi.testclient import TestClient
 from src.utils import MODELS_DIR
 
 REQUIRED_ARTIFACTS = [
-    "matcher_classifier.joblib",
     "skill_vocabulary.joblib",
     "job_catalog.joblib",
 ]
@@ -46,8 +45,7 @@ def test_match_endpoint_returns_ranked_jobs(client, tmp_path, monkeypatch):
     assert len(matches) == 3
 
     top = matches[0]
-    assert set(top.keys()) >= {"job_role", "similarity", "skill_overlap", "best_match_proba"}
-    assert 0.0 <= top["best_match_proba"] <= 1.0
+    assert set(top.keys()) == {"job_role", "similarity", "skill_overlap"}
     # Similarity should be sorted descending.
     assert matches[0]["similarity"] >= matches[1]["similarity"] >= matches[2]["similarity"]
 

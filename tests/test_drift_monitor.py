@@ -31,7 +31,6 @@ def _fake_log(n: int) -> pd.DataFrame:
             "cosine_similarity": [0.9] * n,
             "skill_overlap": [0.5] * n,
             "resume_length": [500] * n,
-            "best_match_proba": [0.8] * n,
             "extra_field_not_used_for_drift": ["noise"] * n,
         }
     )
@@ -47,7 +46,6 @@ def test_load_current_window_selects_drift_columns(monkeypatch):
         "cosine_similarity",
         "skill_overlap",
         "resume_length",
-        "best_match_proba",
     ]
 
 

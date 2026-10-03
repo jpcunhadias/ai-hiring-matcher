@@ -8,22 +8,22 @@ from src.matcher import JobCatalog, rank_jobs
 from src.utils import MODELS_DIR, load_model, logger
 
 
-def load_artifacts() -> tuple[object, set[str], JobCatalog]:
-    logger.info("Loading model, skill vocabulary and job catalog...")
-    model = load_model(MODELS_DIR / "matcher_classifier.joblib")
+def load_artifacts() -> tuple[set[str], JobCatalog]:
+    logger.info("Loading skill vocabulary and job catalog...")
     vocabulary = cast(set, load_model(MODELS_DIR / "skill_vocabulary.joblib"))
     catalog = cast(JobCatalog, load_model(MODELS_DIR / "job_catalog.joblib"))
-    return model, vocabulary, catalog
+    return vocabulary, catalog
 
 
 def match_resume(
     resume_text: str,
-    model: object,
     vocabulary: set[str],
     catalog: JobCatalog,
     top_n: int = 5,
 ) -> pd.DataFrame:
-    """Ranks the catalog's jobs for a resume and scores each with the Best Match classifier."""
+    """Ranks the catalog's jobs for a resume by embedding similarity, with the skill overlap
+    for each. Deliberately returns no "match probability": the Best Match classifier is an
+    audit probe (see src/train_model.py), not something to score people with."""
     resume_embedding = embed_texts([resume_text])[0]
     ranked = rank_jobs(resume_embedding, catalog, top_n=top_n)
 
@@ -33,10 +33,5 @@ def match_resume(
         skill_overlap(resume_skills, extract_job_skills(role_to_description[role], vocabulary))
         for role in ranked["job_role"]
     ]
-
-    features = ranked[["similarity", "skill_overlap"]].rename(
-        columns={"similarity": "cosine_similarity"}
-    )
-    ranked["best_match_proba"] = model.predict_proba(features)[:, 1]  # type: ignore[attr-defined]
 
     return ranked
