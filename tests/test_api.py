@@ -1,9 +1,20 @@
+import pytest
 from fastapi.testclient import TestClient
 
-from src.api import app
-from src.utils import REQUEST_LOG_PATH
+from src.utils import MODELS_DIR
 
-client = TestClient(app)
+REQUIRED_ARTIFACTS = [
+    "matcher_classifier.joblib",
+    "skill_vocabulary.joblib",
+    "job_catalog.joblib",
+]
+
+# src.api loads the trained artifacts at import time, so these tests only make
+# sense after `make train` — skip (rather than fail at collection) on a fresh clone.
+pytestmark = pytest.mark.skipif(
+    not all((MODELS_DIR / name).exists() for name in REQUIRED_ARTIFACTS),
+    reason="Modelos não treinados — rode `make train` primeiro.",
+)
 
 SAMPLE_RESUME = (
     "Proficient in Firewalls, Cyber Threats, Penetration Testing, Vulnerability "
@@ -13,12 +24,21 @@ SAMPLE_RESUME = (
 )
 
 
-def test_root():
+@pytest.fixture(scope="module")
+def client():
+    from src.api import app
+
+    return TestClient(app)
+
+
+def test_root(client):
     response = client.get("/")
     assert response.status_code == 200
 
 
-def test_match_endpoint_returns_ranked_jobs():
+def test_match_endpoint_returns_ranked_jobs(client, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.utils.REQUEST_LOG_PATH", tmp_path / "requests.jsonl")
+
     response = client.post("/match", json={"resume": SAMPLE_RESUME, "top_n": 3})
 
     assert response.status_code == 200
@@ -32,11 +52,13 @@ def test_match_endpoint_returns_ranked_jobs():
     assert matches[0]["similarity"] >= matches[1]["similarity"] >= matches[2]["similarity"]
 
 
-def test_match_endpoint_logs_the_request():
-    REQUEST_LOG_PATH.unlink(missing_ok=True)
+def test_match_endpoint_logs_the_request(client, tmp_path, monkeypatch):
+    # Redirected to tmp_path so the test never touches the real data/logs/requests.jsonl
+    # (the old version of this test deleted it).
+    log_path = tmp_path / "requests.jsonl"
+    monkeypatch.setattr("src.utils.REQUEST_LOG_PATH", log_path)
 
     client.post("/match", json={"resume": SAMPLE_RESUME, "top_n": 1})
 
-    assert REQUEST_LOG_PATH.exists()
-    logged_lines = REQUEST_LOG_PATH.read_text(encoding="utf-8").strip().splitlines()
-    assert len(logged_lines) == 1
+    assert log_path.exists()
+    assert len(log_path.read_text(encoding="utf-8").strip().splitlines()) == 1
