@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v7
 
       # Python version comes from .python-version; the cache is keyed on uv.lock.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
 
