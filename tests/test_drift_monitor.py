@@ -79,11 +79,11 @@ def test_alert_on_drift_warns_above_threshold(caplog):
     with caplog.at_level(logging.WARNING, logger="ml_pipeline"):
         alert_on_drift(0.9, threshold=0.5)
 
-    assert any("ALERTA DE DRIFT" in record.message for record in caplog.records)
+    assert any("DRIFT ALERT" in record.message for record in caplog.records)
 
 
 def test_alert_on_drift_no_warning_below_threshold(caplog):
     with caplog.at_level(logging.WARNING, logger="ml_pipeline"):
         alert_on_drift(0.1, threshold=0.5)
 
-    assert not any("ALERTA DE DRIFT" in record.message for record in caplog.records)
+    assert not any("DRIFT ALERT" in record.message for record in caplog.records)

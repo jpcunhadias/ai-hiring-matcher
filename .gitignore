@@ -23,12 +23,12 @@ venv/
 # PyCharm
 .idea/
 
-# Modelos
+# Models
 *.pkl
 *.joblib
 models/
 
-# Dados: data/external/ (the Kaggle source CSV) is DVC-tracked, so the CSV itself
+# Data: data/external/ (the Kaggle source CSV) is DVC-tracked, so the CSV itself
 # is ignored and only the .dvc pointer file stays in git (DVC manages this ignore
 # entry itself). data/raw/ and datasets/ are covered by ~/.gitignore_global for
 # every project on this machine, so this repo deliberately keeps the dataset under
@@ -41,10 +41,10 @@ data/logs/
 mlruns/
 mlflow.db
 
-# Relatórios gerados (fairness audit, drift)
+# Generated reports (fairness audit, drift)
 reports/
 drift_report.html
 
-# Sistema
+# System
 .DS_Store
 Thumbs.db

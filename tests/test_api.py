@@ -13,7 +13,7 @@ REQUIRED_ARTIFACTS = [
 # sense after `make train` — skip (rather than fail at collection) on a fresh clone.
 pytestmark = pytest.mark.skipif(
     not all((MODELS_DIR / name).exists() for name in REQUIRED_ARTIFACTS),
-    reason="Modelos não treinados — rode `make train` primeiro.",
+    reason="Models not trained — run `make train` first.",
 )
 
 SAMPLE_RESUME = (

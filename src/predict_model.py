@@ -9,7 +9,7 @@ from src.utils import MODELS_DIR, load_model, logger
 
 
 def load_artifacts() -> tuple[object, set[str], JobCatalog]:
-    logger.info("Carregando modelo, vocabulário de skills e catálogo de vagas...")
+    logger.info("Loading model, skill vocabulary and job catalog...")
     model = load_model(MODELS_DIR / "matcher_classifier.joblib")
     vocabulary = cast(set, load_model(MODELS_DIR / "skill_vocabulary.joblib"))
     catalog = cast(JobCatalog, load_model(MODELS_DIR / "job_catalog.joblib"))

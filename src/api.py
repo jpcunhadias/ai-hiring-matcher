@@ -21,13 +21,13 @@ class ResumeRequest(BaseModel):
 
 @app.get("/")
 def read_root():
-    logger.info("Rota raiz acessada.")
-    return {"message": "AI Hiring Matcher API está no ar!"}
+    logger.info("Root route accessed.")
+    return {"message": "AI Hiring Matcher API is up!"}
 
 
 @app.post("/match")
 def match(request: ResumeRequest):
-    logger.info("Recebida requisição para /match (top_n=%d)", request.top_n)
+    logger.info("Received /match request (top_n=%d)", request.top_n)
     try:
         ranked = match_resume(request.resume, _model, _vocabulary, _catalog, top_n=request.top_n)
         top = ranked.iloc[0]
@@ -41,8 +41,8 @@ def match(request: ResumeRequest):
             }
         )
 
-        logger.info("Match concluído. Melhor vaga: %s", top["job_role"])
+        logger.info("Match complete. Best job: %s", top["job_role"])
         return {"matches": ranked.to_dict(orient="records")}
     except Exception as e:
-        logger.error("Erro durante o matching: %s", str(e))
+        logger.error("Error during matching: %s", str(e))
         raise
