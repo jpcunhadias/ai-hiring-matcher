@@ -57,6 +57,13 @@ def gender_gap_by_role(
     return result.reindex(result["gap"].abs().sort_values(ascending=False).index)
 
 
+def group_selection_rates(
+    df: pd.DataFrame, role_col: str = "Job Roles", target_col: str = "Best Match"
+) -> pd.Series:
+    """Selection rate of every (job role, gender) group, indexed by (role, gender)."""
+    return df.groupby([role_col, "Gender"])[target_col].mean()
+
+
 def gender_rate_bimodality(
     df: pd.DataFrame, role_col: str = "Job Roles", target_col: str = "Best Match"
 ) -> dict:
@@ -67,7 +74,7 @@ def gender_rate_bimodality(
     the overall rate), or biased-but-random generation (rates cluster tightly near
     two poles without ever reaching them) — the last is what this dataset shows.
     """
-    rates = df.groupby([role_col, "Gender"])[target_col].mean()
+    rates = group_selection_rates(df, role_col, target_col)
     return {
         "n_groups": int(len(rates)),
         "n_deterministic": int(((rates == 0) | (rates == 1)).sum()),
