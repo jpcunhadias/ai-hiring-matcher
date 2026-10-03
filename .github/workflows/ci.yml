@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # Python version comes from .python-version; the cache is keyed on uv.lock.
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # test_embeddings downloads all-MiniLM-L6-v2 (~80 MB) from the Hugging Face Hub.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run mypy src
+
+      # The API tests skip here: they need trained models, and the dataset isn't
+      # in the repo, so CI can't run `make train`.
+      - name: Test
+        run: uv run pytest
