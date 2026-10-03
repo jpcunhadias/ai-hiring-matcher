@@ -17,6 +17,7 @@ dependencies = [
     "sentence-transformers>=6.0.1",
     "streamlit>=1.63.0",
     "tabulate>=0.10.0",
+    "torch>=2.14.0",
     "uvicorn[standard]>=0.52.4",
 ]
 
@@ -49,3 +50,13 @@ exclude = ["notebooks/"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 addopts = "--disable-warnings"
+
+# Linux (CI, Docker) would otherwise resolve CUDA torch + ~15 nvidia-* packages
+# (several GB) for a CPU-only project. macOS keeps the default PyPI wheel.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
