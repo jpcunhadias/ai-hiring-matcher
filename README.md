@@ -156,20 +156,46 @@ Meant to run on a schedule (cron/systemd timer), not just manually.
 ## Stack
 
 Everything runs on `uv` — no manual `pip`/`venv`, no `requirements.txt`.
-Data ([`data/external/`](data/external)) is versioned with
-[DVC](https://dvc.org), using a local remote by default, so the project
-works fully offline with zero credentials.
+The dataset ([`data/external/`](data/external)) is tracked with
+[DVC](https://dvc.org): git stores only a small pointer file with its
+checksum, which is how you verify you have the right CSV. No shared remote
+is configured, so the project works fully offline with zero credentials.
 
 - **MLflow** tracks experiments to a local sqlite database
   (`sqlite:///mlflow.db`) by default. Point it at any remote tracking
   server via `MLFLOW_TRACKING_URI` in `.env`.
-- **DVC** uses a local remote by default. Swap in any DVC-supported remote
-  (S3, MinIO, GCS, Azure...) via `dvc remote add`/`dvc remote modify`.
+- **DVC** has no default remote. To push/pull the data yourself, add any
+  DVC-supported one (local path, S3, MinIO, GCS, Azure...) with
+  `dvc remote add --local -d <name> <url>` — `--local` keeps it out of the
+  committed config.
 
 See [`.env.example`](.env.example) for all configurable environment
 variables.
 
 ## Quick start
+
+Requires [`uv`](https://docs.astral.sh/uv/) (it installs the pinned Python 3.12
+on its own). The first run downloads the `all-MiniLM-L6-v2` embedding model
+(~80 MB) from the Hugging Face Hub.
+
+### Get the data
+
+The dataset isn't stored in the repo. Download it from
+[Kaggle](https://www.kaggle.com/datasets/surendra365/recruitement-dataset)
+(free account required) and save the CSV as
+`data/external/job_applicant_dataset.csv`. Then confirm it's the exact file
+the project was built on by comparing its MD5 with the `md5:` line in
+`data/external/job_applicant_dataset.csv.dvc` (the two must match):
+
+```bash
+uv run python -c "import hashlib, pathlib; print(hashlib.md5(pathlib.Path('data/external/job_applicant_dataset.csv').read_bytes()).hexdigest())"
+grep md5 data/external/job_applicant_dataset.csv.dvc
+```
+
+(`dvc status` isn't a reliable check on a fresh clone — it reports "not in
+cache" whether or not the file is correct.)
+
+### Run it
 
 ```bash
 uv sync                        # install everything (runtime + dev)
@@ -179,6 +205,9 @@ make serve                     # API at http://localhost:8000
 make test                      # pytest
 make lint                      # ruff + mypy
 ```
+
+`make train` writes the artifacts the API loads (`models/`). Until it has
+run, the API tests are skipped rather than failed.
 
 ### Docker (no credentials needed)
 
@@ -236,7 +265,7 @@ curl -X POST http://localhost:8000/match \
 ## Testing & quality
 
 ```bash
-make test     # pytest (28 tests)
+make test     # pytest
 make lint     # ruff check + mypy
 uv run pre-commit run --all-files
 ```
