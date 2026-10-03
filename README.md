@@ -1,5 +1,6 @@
 # AI Hiring Matcher
 
+[![CI](https://github.com/jpcunhadias/ai-hiring-matcher/actions/workflows/ci.yml/badge.svg)](https://github.com/jpcunhadias/ai-hiring-matcher/actions/workflows/ci.yml)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![uv](https://img.shields.io/badge/managed%20with-uv-de5fe9)
