@@ -51,7 +51,6 @@ def build_top1_reference(
     resume_embeddings: np.ndarray,
     catalog: JobCatalog,
     vocabulary: set[str],
-    model: LogisticRegression,
 ) -> pd.DataFrame:
     """Drift reference must mirror what /match actually computes per request: each
     resume's TOP-1 retrieved job, not the dataset's own (arbitrary) resume/job
@@ -75,9 +74,6 @@ def build_top1_reference(
 
     reference = pd.DataFrame({"cosine_similarity": best_similarity, "skill_overlap": overlaps})
     reference["resume_length"] = df["Resume"].str.len().values
-    reference["best_match_proba"] = model.predict_proba(
-        reference[["cosine_similarity", "skill_overlap"]]
-    )[:, 1]
     return reference
 
 
@@ -149,14 +145,14 @@ def main() -> None:
         (REPORTS_DIR / "fairness_report.md").write_text(report_text, encoding="utf-8")
         mlflow.log_artifact(str(REPORTS_DIR / "fairness_report.md"))
 
-    save_model(model, MODELS_DIR / "matcher_classifier.joblib")
+    # The classifier is logged to MLflow but not saved for serving: /match doesn't use it.
     save_model(vocabulary, MODELS_DIR / "skill_vocabulary.joblib")
     save_model(catalog, MODELS_DIR / "job_catalog.joblib")
 
     # Reference distribution for drift_monitor.py: built the same way as a real
     # /match request (top-1 retrieval, not the dataset's own resume/job pairing) so
     # the comparison against live traffic is apples-to-apples.
-    reference = build_top1_reference(df, resume_embeddings, catalog, vocabulary, model)
+    reference = build_top1_reference(df, resume_embeddings, catalog, vocabulary)
     save_df(reference, REFERENCE_FEATURES_PATH)
 
     logger.info("Training complete. Retrieval metrics: %s", retrieval_metrics)

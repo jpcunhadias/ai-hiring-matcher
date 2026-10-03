@@ -20,7 +20,7 @@ MIN_WINDOW_SIZE = int(os.getenv("DRIFT_MIN_WINDOW_SIZE", "100"))
 # Same feature shape logged per /match request in src/api.py, compared against the
 # training-time reference computed in src/train_model.py — a real live-vs-training
 # comparison, not the old resample-of-itself placeholder.
-DRIFT_COLUMNS = ["cosine_similarity", "skill_overlap", "resume_length", "best_match_proba"]
+DRIFT_COLUMNS = ["cosine_similarity", "skill_overlap", "resume_length"]
 
 
 def load_reference() -> pd.DataFrame:
