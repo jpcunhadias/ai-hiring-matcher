@@ -1,5 +1,2 @@
 [core]
     analytics = false
-    remote = local-storage
-['remote "local-storage"']
-    url = /Users/joaopedroc.dias/.local/share/dvc-storage/ai-hiring-matcher
