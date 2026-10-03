@@ -4,6 +4,7 @@ import pytest
 from src.data_preparation import (
     build_skill_vocabulary,
     extract_job_skills,
+    load_raw_data,
     parse_resume,
     skill_overlap,
     train_test_split_df,
@@ -16,6 +17,11 @@ SAMPLE_RESUME = (
     "(CPT) by NASM. Skilled in delivering results and adapting to dynamic "
     "environments."
 )
+
+
+def test_load_raw_data_missing_file_points_to_readme(tmp_path):
+    with pytest.raises(FileNotFoundError, match="README"):
+        load_raw_data(tmp_path / "missing.csv")
 
 
 def test_parse_resume_extracts_fields():
