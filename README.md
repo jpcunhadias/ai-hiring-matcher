@@ -33,6 +33,7 @@ the data it's trained on.
 - [API](#api)
 - [Project structure](#project-structure)
 - [Testing & quality](#testing--quality)
+- [Responsible use](#responsible-use)
 - [Limitations](#limitations)
 
 ## Features
@@ -282,6 +283,36 @@ make test     # pytest
 make lint     # ruff check + mypy
 uv run pre-commit run --all-files
 ```
+
+## Responsible use
+
+This is a portfolio and research project, **not a hiring tool**. Don't use it,
+or anything derived from it, to screen, rank, or reject real candidates.
+Automated hiring systems are regulated in a growing number of jurisdictions
+and need legal and bias review that this project has not had.
+
+What to keep in mind when reading the results:
+
+- **The data is synthetic.** Every resume follows one template (a single regex
+  parses all 10,000), only 51 job descriptions exist, and 547 names repeat
+  across the 10,000 rows. Nothing here supports conclusions about real
+  hiring.
+- **`Best Match` is not ground truth.** It is strongly gender-skewed within
+  each role and, despite its documented definition, unrelated to the
+  similarity features. The classifier trained on it is weak by design, and its
+  output (probabilities of only 0.47–0.52) should not be read as a score for
+  anyone.
+- **Leaving out protected attributes is not a fairness guarantee.** The
+  classifier never sees `Gender`, `Race`, or `Ethnicity`, but on real resumes
+  text embeddings can carry proxies for them (names, pronouns, schools,
+  employment gaps). The resumes in this dataset contain none of those, so it
+  cannot test that risk.
+- **The audit is narrower than it looks.** It measures skew in the label by
+  group. Its "residual gap" table shows roughly zero for the classifier only
+  because the classifier says nearly the same thing for everyone, which is not
+  evidence of fairness (the generated report says so too). The retrieval
+  matcher's accuracy by demographic group, such as recall@1 per gender, has
+  not been audited.
 
 ## Limitations
 
