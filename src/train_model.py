@@ -33,7 +33,7 @@ def build_features(
     job_embeddings = np.stack([job_embedding_lookup[jd] for jd in df["Job Description"]])
     cosine_sim = np.sum(resume_embeddings * job_embeddings, axis=1)
 
-    logger.info("Extraindo skills e calculando overlap com as vagas...")
+    logger.info("Extracting skills and computing overlap with the jobs...")
     vocabulary = build_skill_vocabulary(df["Resume"])
     overlaps = [
         skill_overlap(
@@ -83,7 +83,7 @@ def build_top1_reference(
 
 def train_classifier(features: pd.DataFrame, target: pd.Series) -> tuple[LogisticRegression, dict]:
     logger.info(
-        "Correlação feature-target: %s",
+        "Feature-target correlation: %s",
         features.assign(**{"Best Match": target}).corr()["Best Match"].to_dict(),
     )
     X_train, X_test, y_train, y_test = train_test_split(
@@ -97,7 +97,7 @@ def train_classifier(features: pd.DataFrame, target: pd.Series) -> tuple[Logisti
 
     y_pred = model.predict(X_test)
     report = classification_report(y_test, y_pred, output_dict=True)
-    logger.info("Avaliação do classificador:\n%s", classification_report(y_test, y_pred))
+    logger.info("Classifier evaluation:\n%s", classification_report(y_test, y_pred))
 
     return model, report
 
@@ -110,10 +110,10 @@ def main() -> None:
 
     df = load_raw_data()
 
-    logger.info("Calculando embeddings de %d resumes...", len(df))
+    logger.info("Computing embeddings for %d resumes...", len(df))
     resume_embeddings = embed_texts(df["Resume"].tolist())
 
-    logger.info("Construindo catálogo de vagas (deduplicado)...")
+    logger.info("Building job catalog (deduplicated)...")
     catalog = build_job_catalog_from_df(df)
     job_embedding_lookup = dict(zip(catalog.descriptions, catalog.embeddings))
 
@@ -159,7 +159,7 @@ def main() -> None:
     reference = build_top1_reference(df, resume_embeddings, catalog, vocabulary, model)
     save_df(reference, REFERENCE_FEATURES_PATH)
 
-    logger.info("Treinamento concluído. Métricas de retrieval: %s", retrieval_metrics)
+    logger.info("Training complete. Retrieval metrics: %s", retrieval_metrics)
 
 
 if __name__ == "__main__":

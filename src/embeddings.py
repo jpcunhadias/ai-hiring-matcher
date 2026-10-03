@@ -12,7 +12,7 @@ MODEL_NAME = "all-MiniLM-L6-v2"
 
 @lru_cache(maxsize=1)
 def get_embedding_model() -> SentenceTransformer:
-    logger.info("Carregando modelo de embeddings: %s", MODEL_NAME)
+    logger.info("Loading embedding model: %s", MODEL_NAME)
     return SentenceTransformer(MODEL_NAME)
 
 

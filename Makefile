@@ -1,36 +1,36 @@
 .PHONY: sync train test lint format serve drift-check monitor
 
-# Instala/sincroniza dependências (runtime + dev) via uv
+# Install/sync dependencies (runtime + dev) via uv
 sync:
 	uv sync
 
-# Treina o modelo, gera embeddings/catálogo de vagas e a referência de drift
+# Train the model; build the job catalog, fairness report and drift reference
 train:
 	uv run python -m src.train_model
 
-# Roda os testes com pytest
+# Run the tests
 test:
 	uv run pytest
 
-# Verifica estilo com ruff e tipos com mypy
+# Lint with ruff and type-check with mypy
 lint:
 	uv run ruff check .
 	uv run mypy src
 
-# Corrige automaticamente com ruff
+# Auto-fix and format with ruff
 format:
 	uv run ruff check . --fix
 	uv run ruff format .
 
-# Sobe a API localmente com reload
+# Serve the API locally with auto-reload
 serve:
 	uv run uvicorn src.api:app --reload
 
-# Compara requisições reais (data/logs/requests.jsonl) contra a referência de treino.
-# Pensado para rodar em um agendamento (cron/systemd timer), não só sob demanda.
+# Compare real requests (data/logs/requests.jsonl) against the training reference.
+# Meant to run on a schedule (cron/systemd timer), not only on demand.
 drift-check:
 	uv run python -m src.drift_monitor
 
-# Sobe o dashboard de monitoramento de drift
+# Launch the drift monitoring dashboard
 monitor:
 	uv run streamlit run src/monitor_app.py

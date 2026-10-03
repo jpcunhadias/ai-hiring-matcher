@@ -26,8 +26,8 @@ DRIFT_COLUMNS = ["cosine_similarity", "skill_overlap", "resume_length", "best_ma
 def load_reference() -> pd.DataFrame:
     if not REFERENCE_PATH.exists():
         raise FileNotFoundError(
-            f"Referência de treino não encontrada em {REFERENCE_PATH}. Rode "
-            "`uv run python -m src.train_model` primeiro."
+            f"Training reference not found at {REFERENCE_PATH}. Run "
+            "`uv run python -m src.train_model` first."
         )
     return pd.read_csv(REFERENCE_PATH)[DRIFT_COLUMNS]
 
@@ -36,13 +36,13 @@ def load_current_window() -> pd.DataFrame:
     log_df = read_request_log()
     if log_df.empty:
         raise ValueError(
-            "Nenhuma requisição registrada ainda em data/logs/requests.jsonl — "
-            "não há janela de produção para comparar. Faça algumas chamadas a /match primeiro."
+            "No requests logged yet in data/logs/requests.jsonl — "
+            "there is no production window to compare. Make some /match calls first."
         )
     if len(log_df) < MIN_WINDOW_SIZE:
         raise ValueError(
-            f"Apenas {len(log_df)} requisições registradas (mínimo: {MIN_WINDOW_SIZE}). "
-            "Testes de drift são pouco confiáveis em janelas pequenas — aguarde mais tráfego."
+            f"Only {len(log_df)} requests logged (minimum: {MIN_WINDOW_SIZE}). "
+            "Drift tests are unreliable on small windows — wait for more traffic."
         )
     return log_df[DRIFT_COLUMNS]
 
@@ -52,20 +52,19 @@ def _extract_drift_share(report_dict: dict) -> float:
         result = metric.get("result", {})
         if "share_of_drifted_columns" in result:
             return result["share_of_drifted_columns"]
-    raise KeyError("share_of_drifted_columns não encontrado no relatório do Evidently.")
+    raise KeyError("share_of_drifted_columns not found in the Evidently report.")
 
 
 def alert_on_drift(drift_share: float, threshold: float = DRIFT_SHARE_THRESHOLD) -> None:
     if drift_share >= threshold:
         logger.warning(
-            "ALERTA DE DRIFT: %.0f%% das features monitoradas apresentam drift "
-            "(limite configurado: %.0f%%).",
+            "DRIFT ALERT: %.0f%% of monitored features show drift (configured threshold: %.0f%%).",
             drift_share * 100,
             threshold * 100,
         )
     else:
         logger.info(
-            "Sem drift significativo: %.0f%% das features monitoradas (limite: %.0f%%).",
+            "No significant drift: %.0f%% of monitored features (threshold: %.0f%%).",
             drift_share * 100,
             threshold * 100,
         )
@@ -75,18 +74,18 @@ def run_drift_check() -> float:
     """Compares real, logged /match requests against the training-time reference
     distribution and raises a threshold-based alert. Wired to `make drift-check` —
     intended to run on a schedule (cron/systemd timer), not just on demand."""
-    logger.info("Carregando referência de treino e janela de requisições reais...")
+    logger.info("Loading training reference and window of real requests...")
     reference = load_reference()
     current = load_current_window()
 
-    logger.info("Executando análise de drift com Evidently...")
+    logger.info("Running drift analysis with Evidently...")
     report = Report(metrics=[DataDriftPreset()])
     report.run(reference_data=reference, current_data=current)
     report.save_html(str(DRIFT_REPORT_PATH))
 
     drift_share = _extract_drift_share(report.as_dict())
     alert_on_drift(drift_share)
-    logger.info("Relatório de drift salvo em: %s", DRIFT_REPORT_PATH)
+    logger.info("Drift report saved to: %s", DRIFT_REPORT_PATH)
     return drift_share
 
 

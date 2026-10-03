@@ -33,7 +33,7 @@ logger = setup_logging("ml_pipeline")
 def save_df(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
-    logger.info("DataFrame salvo em: %s", path)
+    logger.info("DataFrame saved to: %s", path)
 
 
 def load_df(path: Path) -> pd.DataFrame:
@@ -43,7 +43,7 @@ def load_df(path: Path) -> pd.DataFrame:
 def save_model(obj: object, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(obj, path)
-    logger.info("Objeto salvo em: %s", path)
+    logger.info("Object saved to: %s", path)
 
 
 def load_model(path: Path) -> object:

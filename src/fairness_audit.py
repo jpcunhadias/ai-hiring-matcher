@@ -111,7 +111,7 @@ def run_fairness_audit(df: pd.DataFrame) -> FairnessReport:
     skill_overlap and best_match_proba for every row (i.e. training data scored by
     the trained classifier).
     """
-    logger.info("Executando auditoria de fairness...")
+    logger.info("Running fairness audit...")
     report = FairnessReport(
         label_selection_rate=label_selection_rates(df),
         gender_gap_by_role=gender_gap_by_role(df) if "Job Roles" in df.columns else pd.DataFrame(),
@@ -124,8 +124,8 @@ def run_fairness_audit(df: pd.DataFrame) -> FairnessReport:
     ]
     if len(max_gap) == 2 and (max_gap.max() - max_gap.min()) > 0.1:
         logger.warning(
-            "ALERTA DE FAIRNESS: taxa de Best Match difere %.0f pontos percentuais "
-            "entre grupos de Gender no rótulo bruto (antes de qualquer modelo).",
+            "FAIRNESS ALERT: Best Match rate differs by %.0f percentage points "
+            "between Gender groups in the raw label (before any model).",
             (max_gap.max() - max_gap.min()) * 100,
         )
 
