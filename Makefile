@@ -1,4 +1,4 @@
-.PHONY: sync train test lint format serve drift-check monitor
+.PHONY: sync train figures test lint format serve drift-check monitor
 
 # Install/sync dependencies (runtime + dev) via uv
 sync:
@@ -7,6 +7,10 @@ sync:
 # Train the model; build the job catalog, fairness report and drift reference
 train:
 	uv run python -m src.train_model
+
+# Regenerate the README fairness figures (docs/images/); needs the dataset
+figures:
+	uv run python -m src.plots
 
 # Run the tests
 test:
