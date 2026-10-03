@@ -14,6 +14,7 @@ class FairnessReport:
     gender_gap_by_role: pd.DataFrame
     residual_gap: pd.DataFrame
     bimodality: dict
+    proba_range: tuple[float, float]
 
 
 def label_selection_rates(df: pd.DataFrame, target_col: str = "Best Match") -> pd.DataFrame:
@@ -124,6 +125,7 @@ def run_fairness_audit(df: pd.DataFrame) -> FairnessReport:
         gender_gap_by_role=gender_gap_by_role(df) if "Job Roles" in df.columns else pd.DataFrame(),
         residual_gap=residual_gap_by_group(df),
         bimodality=gender_rate_bimodality(df) if "Job Roles" in df.columns else {},
+        proba_range=(float(df["best_match_proba"].min()), float(df["best_match_proba"].max())),
     )
 
     max_gap = report.label_selection_rate.loc[
@@ -150,6 +152,16 @@ def render_fairness_report(report: FairnessReport) -> str:
             "fall in between — a bimodal shape consistent with Best Match having been "
             "sampled as Bernoulli(p) per group, with p fixed near 0.1 or 0.9, rather than "
             "either a hard rule or incidental noise."
+        )
+
+    lo, hi = report.proba_range
+    spread_note = ""
+    if hi - lo < 0.1:
+        spread_note = (
+            f"**Read this table with care:** the classifier's predicted probabilities span "
+            f"only {lo:.2f}-{hi:.2f}, so it says almost the same thing for everyone. Residual "
+            "gaps near zero are therefore expected and are *not* evidence that the matcher "
+            "is fair.\n"
         )
 
     lines = [
@@ -187,6 +199,7 @@ def render_fairness_report(report: FairnessReport) -> str:
         "",
         "## Residual match-probability gap by group",
         "",
+        spread_note,
         "Mean leftover match probability per group *after* regressing out "
         "cosine_similarity and skill_overlap — the part of the model's score that "
         "similarity/skill overlap alone doesn't explain.",

@@ -4,6 +4,7 @@ from src.fairness_audit import (
     gender_gap_by_role,
     gender_rate_bimodality,
     label_selection_rates,
+    render_fairness_report,
     residual_gap_by_group,
     run_fairness_audit,
 )
@@ -72,4 +73,20 @@ def test_run_fairness_audit_returns_all_tables():
     assert not report.gender_gap_by_role.empty
     assert not report.residual_gap.empty
     assert report.bimodality["n_groups"] == 4
+    assert report.proba_range == (0.4, 0.9)
     assert set(report.label_selection_rate["attribute"]) == {"Gender", "Race", "Ethnicity"}
+
+
+def test_report_warns_when_classifier_probabilities_barely_vary():
+    df = _sample_df()
+    df["best_match_proba"] = [0.48, 0.49, 0.48, 0.47]
+
+    text = render_fairness_report(run_fairness_audit(df))
+
+    assert "not* evidence that the matcher is fair" in text
+
+
+def test_report_has_no_warning_when_probabilities_spread():
+    text = render_fairness_report(run_fairness_audit(_sample_df()))
+
+    assert "not* evidence" not in text
