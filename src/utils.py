@@ -11,10 +11,14 @@ DATA_DIR = Path("data")
 MODELS_DIR = Path("models")
 REPORTS_DIR = Path("reports")
 REQUEST_LOG_PATH = DATA_DIR / "logs" / "requests.jsonl"
-# The log is a rolling window: only the most recent rows are kept, so it can't grow forever.
+# The log is a rolling window: it keeps the newest REQUEST_LOG_MAX_ROWS rows and is trimmed back
+# to that size once it passes the cap by TRIM_SLACK (so it isn't rewritten on every request).
 REQUEST_LOG_MAX_ROWS = int(os.getenv("REQUEST_LOG_MAX_ROWS", "10000"))
-_ROW_SIZE_GATE = 200  # bytes/row above which we bother counting lines (a row is ~110 bytes)
+TRIM_SLACK = 0.1
+if REQUEST_LOG_MAX_ROWS < 1:
+    raise ValueError("REQUEST_LOG_MAX_ROWS must be at least 1")
 _request_log_lock = threading.Lock()
+_row_counts: dict[Path, int] = {}
 
 
 def setup_logging(name: str = "ml_pipeline") -> logging.Logger:
@@ -57,13 +61,8 @@ def load_model(path: Path) -> object:
 
 
 def _trim_request_log(path: Path, max_rows: int) -> None:
-    """Keep only the newest `max_rows` rows. A cheap size check comes first, so the file
-    is only read once it is clearly past the cap; trimming rewrites it atomically."""
-    if path.stat().st_size < max_rows * _ROW_SIZE_GATE:
-        return
+    """Keep only the newest `max_rows` rows, rewriting the file atomically."""
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    if len(lines) <= max_rows:
-        return
     tmp = path.with_suffix(".tmp")
     tmp.write_text("".join(lines[-max_rows:]), encoding="utf-8")
     tmp.replace(path)
@@ -73,15 +72,26 @@ def log_request(payload: dict) -> None:
     """Appends one prediction request's features to the local rolling log that
     drift_monitor.py later compares against the training-time reference.
 
-    The log keeps the newest REQUEST_LOG_MAX_ROWS rows. The lock makes append + trim safe
-    across threads in one process; several uvicorn workers would need a real store.
+    Keeps the newest REQUEST_LOG_MAX_ROWS rows (trimmed once the file passes the cap by
+    TRIM_SLACK). The lock makes append + trim safe across threads in one process; several
+    uvicorn workers would need a real store.
     """
+    if REQUEST_LOG_MAX_ROWS < 1:
+        raise ValueError("REQUEST_LOG_MAX_ROWS must be at least 1")
     line = json.dumps(payload, ensure_ascii=False) + "\n"
     with _request_log_lock:
-        REQUEST_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with REQUEST_LOG_PATH.open("a", encoding="utf-8") as f:
+        path = REQUEST_LOG_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            _row_counts[path] = 0
+        elif path not in _row_counts:
+            _row_counts[path] = sum(1 for _ in path.open(encoding="utf-8"))
+        with path.open("a", encoding="utf-8") as f:
             f.write(line)
-        _trim_request_log(REQUEST_LOG_PATH, REQUEST_LOG_MAX_ROWS)
+        _row_counts[path] += 1
+        if _row_counts[path] > REQUEST_LOG_MAX_ROWS * (1 + TRIM_SLACK):
+            _trim_request_log(path, REQUEST_LOG_MAX_ROWS)
+            _row_counts[path] = REQUEST_LOG_MAX_ROWS
 
 
 def read_request_log(path: Path = REQUEST_LOG_PATH) -> pd.DataFrame:
