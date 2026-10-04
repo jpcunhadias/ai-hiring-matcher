@@ -131,7 +131,8 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "ADDRESS",  # street + optional number; city and state are kept
         re.compile(
-            r"\b(?:rua|r\.|avenida|av\.|alameda|travessa|rodovia|estrada|pra[cç]a)\s+"
+            r"(?:\b(?:rua|avenida|alameda|travessa|rodovia|estrada|pra[cç]a|r\.|av\.)(?:\s*:\s*|\s+)"
+            r"|(?<=anos)r\.\s*:\s*)"  # "34 anosr.: ..." (glued by text extraction)
             r"[a-zà-ú0-9 .'\[\]-]{2,40}?(?:,?\s*(?:n[º°o.]?\s*)?\d{1,5})?"
             r"(?=[,;\n]|\s[-–]\s|\.\s|$)",
             re.IGNORECASE,
@@ -147,7 +148,7 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         ),
     ),
 ]
-_BARE_AGE = re.compile(r"(?<![\w\[])(?:1[89]|[2-5]\d|6[0-5]) anos(?!\w)")
+_BARE_AGE = re.compile(r"(?<![\w\[])(?:1[89]|[2-5]\d|6[0-5]) anos(?!\w\w)")  # tolerates "anosr."
 _REPLACEMENT = {"ATTRIBUTE": _REDACTED}
 
 
@@ -190,9 +191,10 @@ def _mask_bare_ages(text: str, stats: Counter | None = None) -> str:
         before = text[max(0, match.start() - 14) : match.start()].rstrip(" \t")
         after = text[match.end() : match.end() + 14].lstrip(" \t")
         keyword = re.search(r"\b(?:tenho|idade)$", before)
+        personal = re.search(r"(?:\[[a-z_]+\]|brasileir[oa]),$", before, re.I)
         left = not before or before[-1] in ",;(-–|/]:\n"
-        right = not after or after[0] in ",.;)|/\n-–["
-        if not (keyword or (left and right)):
+        right = not after or after[0] in ",.;)|/\n-–[("
+        if not (keyword or personal or (left and right)):
             return match.group()
         if stats is not None:
             stats["AGE"] += 1
@@ -335,6 +337,9 @@ _ALWAYS_KNOWN = frozenset(
 )
 _TOKEN = re.compile(r"[^\W\d_]+")
 _GAP = re.compile(r"[ \t\-–]+")
+# in the first lines a name is often extracted one word per line ("rhandy\nmendes\nferreira")
+_GAP_HEADER = re.compile(r"[ \t\-–]*\n?[ \t\-–]*")
+_HEADER_NEWLINE_CHARS = 150
 
 
 @dataclass(frozen=True)
@@ -389,21 +394,41 @@ def mask_name_chains(text: str, dictionary: NameDictionary, stats: Counter | Non
     i = 0
     while i < len(tokens):
         word = tokens[i][0]
+        gap = (
+            _GAP_HEADER if dictionary.known_words and tokens[i][1] < _HEADER_NEWLINE_CHARS else _GAP
+        )
         # "santo andré", "santa catarina": saint words are IBGE first names but start places
-        if (
+        starts = (
             word in dictionary.first_names
             and word not in _SAINT
             and not (i > 0 and tokens[i - 1][0] in _SAINT)
-        ):
-            last, count, j, unknown = i, 1, i + 1, 0
+        )
+        # "rhandy mendes ferreira": a first name the list lacks, but two known surnames follow
+        lead_unknown = (
+            not starts
+            and bool(dictionary.known_words)
+            and tokens[i][1] < _HEADER_CHARS
+            and len(word) >= 4
+            and word not in dictionary.known_words
+            and word not in dictionary.name_tokens
+            and i + 2 < len(tokens)
+            and all(
+                tokens[k][0] in dictionary.name_tokens
+                and tokens[k][0] not in _SAINT
+                and gap.fullmatch(text[tokens[k - 1][2] : tokens[k][1]])
+                for k in (i + 1, i + 2)
+            )
+        )
+        if starts or lead_unknown:
+            last, count, j, unknown = i, 1, i + 1, int(lead_unknown)
             while j < len(tokens) and count < 4:
-                if not _GAP.fullmatch(text[tokens[j - 1][2] : tokens[j][1]]):
+                if not gap.fullmatch(text[tokens[j - 1][2] : tokens[j][1]]):
                     break
                 nxt = tokens[j][0]
                 if nxt in _PARTICLES and j + 1 < len(tokens):
                     after = tokens[j + 1][0]
                     gap2 = text[tokens[j][2] : tokens[j + 1][1]]
-                    if after in dictionary.name_tokens and _GAP.fullmatch(gap2):
+                    if after in dictionary.name_tokens and gap.fullmatch(gap2):
                         j += 1
                         continue
                 if nxt in dictionary.name_tokens and len(nxt) >= 3:

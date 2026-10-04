@@ -160,6 +160,10 @@ def test_year_ranges_with_spaced_dashes_are_not_phones():
         ("nascida em [DATE], 34 anos.", "nascida em [DATE], [AGE]."),
         ("brasileiro, 34 anos, [REDACTED]", "brasileiro, [AGE], [REDACTED]"),
         ("tenho 41 anos e moro em sp", "tenho [AGE] e moro em sp"),
+        ("brasileira, 34 anos ([DATE])", "brasileira, [AGE] ([DATE])"),
+        ("[DATE], 34 anos (sp)", "[DATE], [AGE] (sp)"),
+        ("[EMAIL], 34 anos. fim", "[EMAIL], [AGE]. fim"),
+        ("[REDACTED], 34 anosr.: x", "[REDACTED], [AGE][ADDRESS]"),
         ("mais de 10 anos de experiência", "mais de 10 anos de experiência"),
         ("atuo há 20 anos na área", "atuo há 20 anos na área"),
         ("com 15 anos de mercado", "com 15 anos de mercado"),
@@ -182,6 +186,10 @@ def test_street_addresses_and_neighborhoods_are_masked_but_cities_and_parks_stay
         "mora no [LOCATION], hortolândia"
     )
     assert mask_patterns("avenida [NAME], 1000, sp") == "[ADDRESS], sp"
+    assert mask_patterns("r.: 24 de maio, 92") == "[ADDRESS]"
+    assert mask_patterns("r.: [NAME], 9") == "[ADDRESS]"
+    assert mask_patterns("m.r.f. e j.r.r.") == "m.r.f. e j.r.r."  # initials, not "r."
+    assert mask_patterns("ruano silva") == "ruano silva"  # "rua" inside a word is not a street
     assert mask_patterns("parque tecnológico de são josé") == "parque tecnológico de são josé"
 
 
@@ -333,6 +341,16 @@ def test_unknown_surnames_after_a_first_name_are_masked_near_the_top_only():
         "[NAME]\nanalista de vendas"
     )
     assert mask_name_chains("maria silva lucindo mesquita santos", open_dict) == "[NAME] santos"
+    # an unknown first name is caught when two known surnames follow it
+    surnames = NameDictionary.build(["maria"], ["silva", "santos"], known_words=words)
+    assert mask_name_chains("rhandy silva santos", surnames) == "[NAME]"
+    assert mask_name_chains("rhandy silva", surnames) == "rhandy silva"
+    # extracted one word per line at the top of a CV
+    assert mask_name_chains("rhandy\nsilva\nsantos\nanalista", surnames) == "[NAME]\nanalista"
+    assert mask_name_chains("maria\nsilva\n\nanalista", surnames) == "[NAME]\n\nanalista"
+    # schools and places that follow a saint word are not people
+    saints = NameDictionary.build(["maria"], ["silva", "sao"], known_words=words)
+    assert mask_name_chains("senac são silva", saints) == "senac são silva"
     # a known word is never a surname, and a first name alone is not a chain
     assert mask_name_chains("maria gerente de projetos", open_dict) == "maria gerente de projetos"
     assert mask_name_chains("maria julho", open_dict) == "maria julho"  # months are ordinary words
