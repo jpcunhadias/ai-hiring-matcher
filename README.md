@@ -315,8 +315,10 @@ What to keep in mind when reading the results:
   group. Its "residual gap" table shows roughly zero for the classifier only
   because the classifier says nearly the same thing for everyone, which is not
   evidence of fairness (the generated report says so too). The retrieval
-  matcher's accuracy by demographic group, such as recall@1 per gender, has
-  not been audited.
+  matcher is audited separately: its recall@1 shows no difference by gender,
+  race, or ethnicity beyond sampling noise (chi-square p = 0.64, 1.00, 0.52).
+  That is expected here, since these resumes contain no demographic cues, so it
+  says nothing about real resumes.
 
 ## Limitations
 
