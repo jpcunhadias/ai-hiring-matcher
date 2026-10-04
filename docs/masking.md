@@ -43,14 +43,21 @@ Layers run in this order on every free-text field:
    label is redacted, whether it follows a separator, sits on the next line, or is a bare
    number (`idade 32`, `rg 12 345 678 9`).
 2. **Patterns:** emails, URLs, CPF/CNPJ/RG, postcodes, dates (numeric, ISO, written out, also
-   glued to a letter), phone numbers (including spaced ones), long digit runs, "N anos de
-   idade", marital status and "N filhos". Year ranges such as `2015-2018` are left alone.
+   glued to a letter), phone numbers (including spaced, en-dash and "(" -less ones), long digit
+   runs, marital status and children ("sem filhos", "2 filhos"), street addresses
+   (`[ADDRESS]`) and neighborhood names (`[LOCATION]`; the city and state are kept). Ages are
+   masked in a personal-data context only ("nascida em [DATE], 34 anos."); "mais de 10 anos
+   de experiência" stays. Year ranges such as `2015-2018` are left alone.
 3. **The applicant's own name**, from the structured record: accent-insensitive,
    whole-phrase, also for short names.
 4. **Name chains from a dictionary.** A run of 2–4 tokens on one line that starts with a
    common Brazilian first name and continues with name tokens is masked. The dictionary is
    the 3,000 most frequent first names of the IBGE census plus the name tokens that occur in
-   the source system's own name fields. `santo`/`santa`/`são` never start a chain
+   the source system's own name fields. In the first 400 characters of a text (where a
+   person's own name sits), up to two *unknown* words after a first name also continue the
+   chain, as unknown surnames: a word is unknown when it is not an ordinary word of the
+   vacancy vocabulary. Deeper in a text this is off, because there an unknown word after a
+   first name is more often a school or employer. `santo`/`santa`/`são` never start a chain
    (`Santo André` is a place). Commas and line breaks end a chain.
 5. **Named-entity recognition** (multilingual BERT), only on short fields that keep their
    capitalization (titles, professional title). Spans are split at technology and job words
@@ -68,8 +75,10 @@ for the unrestricted 64k-name list. NER is also the slow part (about 70 chunks/s
 GPU for the 172k CV chunks), so dropping it for CVs turns a 45-minute run into minutes.
 Evaluated and rejected: Presidio (a framework with no Portuguese configuration of its own),
 piiranha (no Portuguese), `gliner_multi_pii` (highest precision, but recall around 0.3 here).
-These numbers come from synthetic names, not from labelled real ones, so treat 90% as an
-estimate of the dictionary's recall, not a guarantee.
+These numbers come from synthetic names, not from labelled real ones, and they overstated the
+dictionary: real surnames are often not in any list, so a real CV with "marcela lucindo" kept
+its name until the unknown-surname rule above was added (found by an outside review of the
+review sample). Treat the recall as unknown, somewhere below 90%, for names outside the header.
 
 ## `--repair`
 
@@ -115,10 +124,11 @@ and they mean different things:
   proves the masker agrees with itself.
 - `independent_residual_estimate` uses separately written, looser checks and estimates what may
   still have slipped through. It is not zero: part of it is false positives (employer
-  domains such as `x.com.br`, `analista @ empresa`, 8-digit numbers in vacancy titles). On the
-  real CVs the repair took the independent hits for ISO dates, labeled values, civil status and
-  label-then-text lines to 0, and halved the date and phone-like hits; the rest were
-  dd/mm/yyyy dates in odd shapes and bare 4+4-digit numbers.
+  domains such as `x.com.br`, `analista @ empresa`, 8-digit numbers in vacancy titles, year
+  ranges split across lines that look like phone numbers, and job-tenure lines such as
+  `12 anos` on their own line that look like ages). On the real CVs the repair took the
+  independent hits for ISO dates, labeled values, civil status, label-then-text lines and
+  neighborhood-like phrases to 0 or near 0, and cut the date and phone-like hits roughly in half.
 
 For a manual check, `--review N` writes N masked CVs to `data/masked/review_sample.txt` so you
 can read them yourself and look for anything the automation missed.
