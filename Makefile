@@ -1,4 +1,4 @@
-.PHONY: sync ingest repair data-summary feature-report train baselines figures test lint format serve drift-check monitor
+.PHONY: sync ingest repair data-summary feature-report rank train baselines figures test lint format serve drift-check monitor
 
 # Install/sync dependencies (runtime + dev) via uv
 sync:
@@ -19,6 +19,10 @@ data-summary:
 # Each feature alone as a ranking rule on the later vacancies (aggregates only)
 feature-report:
 	uv run python -m src.feature_report $(ARGS)
+
+# Rolling-fold supervised rankers on the masked real data (aggregates only; a few minutes)
+rank:
+	uv run python -m src.ranker $(ARGS)
 
 # Train the model; build the job catalog, fairness report and drift reference
 train:

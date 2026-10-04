@@ -27,6 +27,7 @@ fairness checks only.
 import argparse
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -155,13 +156,15 @@ def temporal_split(
     setting: Setting,
     test_fraction: float = 0.2,
     cutoff: str | None = None,
+    test_until: str | None = None,
 ) -> Split:
     """Train on earlier vacancies, test on later ones; no shuffling, no label leakage.
 
     The cutoff is the requested month below which `1 - test_fraction` of the vacancies with at
     least two candidacies fall (a label-free criterion, so no outcome influences it), or the
     month given as `cutoff` ("YYYY-MM"). Training labels are rebuilt as of the cutoff before the
-    rankable vacancies are selected.
+    rankable vacancies are selected. With `test_until`, only vacancies requested up to that month
+    are tested (a window, for rolling evaluation).
     """
     if not 0 < test_fraction < 1:
         raise ValueError("test_fraction must be between 0 and 1")
@@ -178,7 +181,10 @@ def temporal_split(
 
     early = pairs["requested_month"] <= cutoff
     train_pool = pairs[early & (pairs["candidacy_month"] <= cutoff)]
-    test_pool = pairs[~early]
+    late = ~early
+    if test_until is not None:
+        late &= pairs["requested_month"] <= test_until
+    test_pool = pairs[late]
     train = select_setting(labels_as_of(pairs[early], cutoff), setting)
     test = select_setting(test_pool, setting)
     if train.empty or test.empty:
@@ -190,6 +196,30 @@ def temporal_split(
         train_pool.reset_index(drop=True),
         test_pool.reset_index(drop=True),
     )
+
+
+def _shift_month(month: str, delta: int) -> str:
+    index = int(month[:4]) * 12 + int(month[5:]) - 1 + delta
+    return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+
+def rolling_splits(
+    pairs: pd.DataFrame, setting: Setting, first_cutoff: str, step_months: int = 6
+) -> Iterator[Split]:
+    """Expanding-window folds: train up to a cutoff, test the next `step_months` of vacancies,
+    then move the cutoff forward. Every vacancy is tested at most once, by a model that only
+    saw the past. Windows with an empty train or test set are skipped."""
+    if step_months < 1:
+        raise ValueError("step_months must be at least 1")
+    last = str(pairs["requested_month"].max())
+    cutoff = first_cutoff
+    while cutoff < last:
+        until = _shift_month(cutoff, step_months)
+        try:
+            yield temporal_split(pairs, setting, cutoff=cutoff, test_until=until)
+        except ValueError:
+            logger.info("window %s..%s skipped: nothing to train or test on", cutoff, until)
+        cutoff = until
 
 
 def audit_attributes(tables: MaskedTables) -> pd.DataFrame:

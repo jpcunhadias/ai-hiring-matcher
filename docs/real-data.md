@@ -93,5 +93,49 @@ tests that guard them are described in the commit history.
 
 Consequences for the project: the zero-shot text similarity measured over all vacancies (about
 +4 points) is weak and does not clearly persist on later vacancies; and with this few test
-vacancies, only a large effect could be detected. The next step is a supervised ranker
-evaluated over several rolling cutoffs, which yields more test vacancies.
+vacancies, only a large effect could be detected.
+
+## Rolling-fold ranker (`src/ranker.py`)
+
+```bash
+make rank     # first cutoff 2021-06, six-month test windows
+```
+
+Each fold trains on every vacancy up to a cutoff, with labels as they stood then, and tests on
+the next six months of vacancies with their final labels; every vacancy is tested once by a
+model that only saw the past. That gives 244 test vacancies (resolved-only, 7 folds) and 474
+(all-prospects, 8 folds) instead of the 57 and 125 of a single split. Models are pointwise
+(a hire probability per candidate, ranked inside the vacancy): a regularized logistic and a
+small gradient-boosted tree model. Pooled hit@1 gain over a random order, 95% bootstrap
+interval over vacancies:
+
+| Method | resolved-only | all-prospects |
+|---|---|---|
+| TF-IDF zero-shot | +2.2 [-4.0, +7.8] | +3.6 [-0.2, +7.2] |
+| logistic | -4.2 [-9.6, +1.2] | +2.0 [-1.5, +5.4] |
+| boosted trees | -3.8 [-9.5, +1.7] | +2.2 [-1.4, +5.9] |
+| logistic, within-vacancy centered | -0.6 [-6.2, +4.9] | +4.1 [+0.4, +8.0] |
+| boosted trees, within-vacancy centered | +1.9 [-3.7, +7.8] | **+6.4 [+2.7, +10.1]** |
+| `lag_months` alone (process artifact) | +10.4 [+7.3, +13.9] | +4.5 [+2.6, +6.4] |
+
+What the numbers do and do not say:
+
+* **The raw pointwise models do no better than TF-IDF** (resolved-only: worse than random).
+  Their largest weight is the number of candidates in the vacancy, a vacancy-level effect that
+  cannot help rank candidates inside it. *Centering* every feature on its vacancy mean (a
+  change made after seeing these first results, so it is one of about nine variants and should
+  be read with that in mind) removes it.
+* **The best clean model is the centered boosted one on all-prospects (+6.4)**, positive in 7 of
+  its 8 folds, but its paired difference to plain TF-IDF is +2.8 [-1.5, +7.3]: not
+  distinguishable from the zero-shot rule. On resolved-only, where the labels are cleaner, no
+  model beats random and the per-fold signs flip.
+* **The all-prospects label counts pending candidates as not hired**, so some "negatives" are
+  hires that have not happened yet; that adds noise, and it may also favor features that track
+  how far a candidate got in the funnel.
+* **The strongest single signal is still the artifact**: `lag_months` alone is +10.4 on
+  resolved-only, more than any model. It is excluded from the clean models; adding it back
+  ("+ lag" rows in the report) does not help them either, since the pointwise model dilutes it.
+
+Honest summary: the data supports a small text-matching signal (about +4 points of hit@1) that a
+plain TF-IDF rule already captures; engineered structured features and a supervised model add,
+at best, a few points that the available test vacancies cannot confirm.
