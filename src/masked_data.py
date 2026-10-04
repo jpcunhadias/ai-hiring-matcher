@@ -13,8 +13,11 @@ Ranking is judged within a vacancy, so a vacancy is kept only if it has at least
 candidacies and at least one hire (and, when resolved-only, at least one non-hire too).
 
 Split. Vacancies are split by their requested month: train on earlier vacancies, test on later
-ones. A training row is dropped if its outcome was only recorded after the cutoff, because in
-production that label would not be known yet.
+ones. The split comes first and the labels are then rebuilt *as of the cutoff*: a candidacy that
+did not exist yet is dropped, and an outcome recorded after the cutoff (or with no date at all)
+counts as still pending, exactly as it would have in production. Only then are the rankable
+vacancies chosen, so no future outcome decides what the training set contains. The test period
+keeps its final labels, because that is what is being predicted.
 
 Sex, disability and age band live in the separate `sensitive` table. They are not joined into
 the pairs, so they cannot become features by accident; `audit_attributes` returns them for
@@ -23,6 +26,7 @@ fairness checks only.
 
 import argparse
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -58,9 +62,11 @@ class MaskedTables:
 
 @dataclass(frozen=True)
 class Split:
-    train: pd.DataFrame
-    test: pd.DataFrame
+    train: pd.DataFrame  # labels as known at the cutoff, rankable vacancies only
+    test: pd.DataFrame  # final labels, rankable vacancies only
     cutoff: str  # last requested month that belongs to the training period
+    train_pool: pd.DataFrame  # every candidacy of the train vacancies that existed at the cutoff
+    test_pool: pd.DataFrame  # every candidacy of the test vacancies, whatever its outcome
 
 
 def load_masked(masked_dir: Path | None = None) -> MaskedTables:
@@ -128,27 +134,62 @@ def select_setting(pairs: pd.DataFrame, setting: Setting) -> pd.DataFrame:
     return frame[frame["vacancy_id"].isin(stats.index[keep])].reset_index(drop=True)
 
 
-def temporal_split(frame: pd.DataFrame, test_fraction: float = 0.2) -> Split:
-    """Train on earlier vacancies, test on later ones; no random shuffling, no label leakage.
+def labels_as_of(frame: pd.DataFrame, cutoff: str) -> pd.DataFrame:
+    """The labels as they stood at the end of the cutoff month.
 
-    The cutoff is the requested month below which `1 - test_fraction` of the vacancies fall.
-    Vacancies requested after the cutoff are the test set. Training rows whose outcome was
-    recorded after the cutoff are dropped: that label would not exist yet at training time.
+    Candidacies started after the cutoff did not exist yet. An outcome counts only if it was
+    recorded by then; one recorded later, or without a date, is pending at the cutoff.
+    """
+    existing = frame[frame["candidacy_month"] <= cutoff].copy()
+    known = existing["resolved"] & existing["updated_month"].notna()
+    known &= existing["updated_month"] <= cutoff
+    unknown = existing["resolved"] & ~known
+    existing.loc[unknown, "outcome"] = "pending"
+    existing.loc[unknown, "y"] = 0
+    existing["resolved"] = existing["resolved"] & known
+    return existing
+
+
+def temporal_split(
+    pairs: pd.DataFrame,
+    setting: Setting,
+    test_fraction: float = 0.2,
+    cutoff: str | None = None,
+) -> Split:
+    """Train on earlier vacancies, test on later ones; no shuffling, no label leakage.
+
+    The cutoff is the requested month below which `1 - test_fraction` of the vacancies with at
+    least two candidacies fall (a label-free criterion, so no outcome influences it), or the
+    month given as `cutoff` ("YYYY-MM"). Training labels are rebuilt as of the cutoff before the
+    rankable vacancies are selected.
     """
     if not 0 < test_fraction < 1:
         raise ValueError("test_fraction must be between 0 and 1")
-    if frame["requested_month"].isna().any():
+    if pairs["requested_month"].isna().any():
         raise ValueError("every vacancy needs a requested_month to be split by time")
-    months = frame.drop_duplicates("vacancy_id")["requested_month"].sort_values()
-    if months.nunique() < 2:
-        raise ValueError("need at least two distinct months to split by time")
-    cutoff = str(months.iloc[int((1 - test_fraction) * len(months)) - 1])
-    in_train = frame["requested_month"] <= cutoff
-    known = frame["updated_month"].isna() | (frame["updated_month"] <= cutoff)
-    train, test = frame[in_train & known], frame[~in_train]
+    sizes = pairs.groupby("vacancy_id").agg(n=("y", "size"), month=("requested_month", "first"))
+    months = sizes.loc[sizes["n"] >= 2, "month"].sort_values()
+    if cutoff is None:
+        if months.nunique() < 2:
+            raise ValueError("need at least two distinct months to split by time")
+        cutoff = str(months.iloc[int((1 - test_fraction) * len(months)) - 1])
+    elif not re.fullmatch(r"\d{4}-\d{2}", cutoff):
+        raise ValueError("cutoff must look like 'YYYY-MM'")
+
+    early = pairs["requested_month"] <= cutoff
+    train_pool = pairs[early & (pairs["candidacy_month"] <= cutoff)]
+    test_pool = pairs[~early]
+    train = select_setting(labels_as_of(pairs[early], cutoff), setting)
+    test = select_setting(test_pool, setting)
     if train.empty or test.empty:
         raise ValueError("the split left an empty train or test set")
-    return Split(train.reset_index(drop=True), test.reset_index(drop=True), cutoff)
+    return Split(
+        train.reset_index(drop=True),
+        test.reset_index(drop=True),
+        cutoff,
+        train_pool.reset_index(drop=True),
+        test_pool.reset_index(drop=True),
+    )
 
 
 def audit_attributes(tables: MaskedTables) -> pd.DataFrame:
@@ -173,16 +214,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize the masked data per label setting.")
     parser.add_argument("--masked-dir", type=Path, default=None)
     parser.add_argument("--test-fraction", type=float, default=0.2)
+    parser.add_argument("--cutoff", default=None, help="last training month, e.g. 2022-06")
     args = parser.parse_args()
 
     pairs = build_pairs(load_masked(args.masked_dir))
     logger.info("pairs with a vacancy text, a CV and an outcome record: %s", summarize(pairs))
     for setting in SETTINGS:
-        frame = select_setting(pairs, setting)
-        split = temporal_split(frame, args.test_fraction)
-        logger.info("%s: %s", setting, summarize(frame))
+        split = temporal_split(pairs, setting, args.test_fraction, args.cutoff)
         logger.info(
-            "  split at %s | train %s | test %s",
+            "%s | split at %s | train %s | test %s",
+            setting,
             split.cutoff,
             summarize(split.train),
             summarize(split.test),

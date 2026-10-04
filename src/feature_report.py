@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from src.features import PROCESS_ARTIFACTS, Encoder, FeatureBuilder
-from src.masked_data import SETTINGS, build_pairs, load_masked, select_setting, temporal_split
+from src.masked_data import SETTINGS, build_pairs, load_masked, temporal_split
 from src.rank_metrics import gain_with_ci, per_vacancy_metrics, random_metrics
 from src.utils import logger
 
@@ -22,6 +22,7 @@ NOTE = "  <- process artifact, not used by the model"
 SINGLE = [
     "tfidf_word", "tfidf_char", "title_sim", "query_coverage", "skills_coverage", "e5_cosine",
     "area_exact", "area_group", "sap_match", "seniority_in_cv", "education_gap", "english_gap",
+    "spanish_gap", "client_prior_hire_rate",
     "a_education_filled", "a_english_filled", "a_area_filled", "a_skills_filled", "a_title_filled",
     "cv_len_log", "prior_candidacies", "prior_hires", "lag_months",
 ]  # fmt: skip
@@ -41,20 +42,30 @@ def e5_encoder(model_name: str = "intfloat/multilingual-e5-small") -> Encoder:
     return encode
 
 
+RESULT_COLUMNS = ["feature", "hit@1", "gain", "low", "high"]
+
+
 def single_feature_table(test: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
+    """One row per feature that can rank candidates inside at least one vacancy.
+
+    A missing value ranks below every observed one, so a feature is judged constant only after
+    that rule is applied: a vacancy where one candidate has a value and the rest are missing
+    still gets a ranking.
+    """
     random = random_metrics(test)["hit@1"]
     rows = []
     for name in SINGLE:
-        if name not in feats:
+        if name not in feats or feats[name].notna().sum() == 0:
             continue
         values = feats[name]
-        if values.groupby(test["vacancy_id"]).nunique().max() <= 1:
+        scores = values.fillna(values.min() - 1.0)
+        if scores.groupby(test["vacancy_id"]).nunique().max() <= 1:
             continue  # constant inside every vacancy: it cannot rank
-        scores = values.fillna(values.min() - 1.0).to_numpy()
-        hit1 = per_vacancy_metrics(test, scores)["hit@1"]
+        hit1 = per_vacancy_metrics(test, scores.to_numpy())["hit@1"]
         gain, low, high = gain_with_ci(hit1, random)
         rows.append({"feature": name, "hit@1": hit1.mean(), "gain": gain, "low": low, "high": high})
-    return pd.DataFrame(rows).sort_values("gain", ascending=False).reset_index(drop=True)
+    table = pd.DataFrame(rows, columns=RESULT_COLUMNS)
+    return table.sort_values("gain", ascending=False).reset_index(drop=True)
 
 
 def main() -> None:
@@ -66,9 +77,9 @@ def main() -> None:
     pairs = build_pairs(load_masked(args.masked_dir))
     encoder = e5_encoder() if args.embed else None
     for setting in SETTINGS:
-        split = temporal_split(select_setting(pairs, setting))
+        split = temporal_split(pairs, setting)
         builder = FeatureBuilder(encoder=encoder).fit(split.train)
-        feats = builder.transform(split.test, history=pairs)
+        feats = builder.transform(split.test, history=pairs, pool=split.test_pool)
         random = random_metrics(split.test)["hit@1"].mean()
         logger.info(
             "%s | test: %d vacancies, %d candidacies | cutoff %s | random hit@1 %.3f",

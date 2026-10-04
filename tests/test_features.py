@@ -251,3 +251,98 @@ def test_process_artifacts_are_excluded_from_the_model_columns_unless_asked_for(
     assert "lag_months" not in model_features(feats)
     assert "lag_months" in model_features(feats, include_process=True)
     assert "tfidf_word" in model_features(feats)
+
+
+def test_education_compound_names_pick_the_most_specific_level():
+    assert education_rank("Ensino Médio Técnico Completo") == 2.5
+    assert education_rank("Pós Doutorado Completo") == 6
+    assert education_rank("Doutorado Cursando") == 5.5
+    ladder = ["Ensino Fundamental Completo", "Ensino Médio Completo", "Ensino Técnico Completo",
+              "Ensino Superior Completo", "Pós Graduação Completo", "Mestrado Completo",
+              "Doutorado Completo"]  # fmt: skip
+    ranks = [education_rank(v) for v in ladder]
+    assert ranks == sorted(ranks) and len(set(ranks)) == len(ranks)
+
+
+@pytest.mark.parametrize("missing", [np.nan, None, pd.NA])
+def test_missing_values_in_text_and_category_columns_do_not_crash(missing):
+    frame = basic_frame()
+    columns = ["a_education_level", "a_english_level", "a_area", "a_professional_title",
+               "a_technical_skills", "v_areas", "v_seniority", "v_is_sap", "v_title"]  # fmt: skip
+    for column in columns:
+        frame[column] = frame[column].astype(object)
+        frame.loc[frame.index[:3], column] = missing
+    blank = frame.copy()
+    blank = blank.fillna("").replace({pd.NA: ""})
+    builder = small().fit(basic_frame())
+
+    pd.testing.assert_frame_equal(builder.transform(frame), builder.transform(blank))
+
+
+def test_the_character_and_query_vocabularies_are_fit_on_the_training_frame_only():
+    train, test = basic_frame().iloc[:3], basic_frame().iloc[3:].copy()
+    test["cv_text"] = test["cv_text"] + " qzxjvmarker"
+    test["query"] = test["query"] + " wvkqzholdout"
+
+    builder = small().fit(train)
+    builder.transform(test)
+
+    assert not {"qzx", "zxj", "xjv", "jvm"} & set(builder._char.vocabulary_)  # type: ignore[union-attr]
+    assert "wvkqzholdout" not in builder._word.vocabulary_  # type: ignore[union-attr]
+    assert "wvkqzholdout" not in builder._common
+
+
+def _flipped(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.assign(
+        y=1 - frame["y"], outcome="pending", status="other", resolved=False, updated_month="2099-01"
+    )
+
+
+def test_a_feature_cannot_read_the_label_of_the_row_it_describes():
+    frame = basic_frame()
+    builder = small().fit(frame)
+
+    plain = builder.transform(frame)  # no history: nothing may depend on any label
+
+    pd.testing.assert_frame_equal(plain, builder.transform(_flipped(frame)))
+
+
+def test_features_do_not_move_when_labels_of_the_latest_month_change():
+    frame = basic_frame()  # v2's rows are the latest (2020-09)
+    builder = small().fit(frame)
+    latest = frame["candidacy_month"] == "2020-09"
+    altered = pd.concat([frame[~latest], _flipped(frame[latest])]).sort_index()
+
+    before = builder.transform(frame, history=frame)
+    after = builder.transform(altered, history=altered)
+
+    pd.testing.assert_frame_equal(before, after)  # nobody comes after them, so nothing can see it
+
+
+def test_context_is_computed_over_the_pool_whatever_the_outcome_of_its_members():
+    pool = basic_frame()
+    evaluated = pool[pool["resolved"]].iloc[[0, 1]]  # only some candidates are scored
+    builder = small().fit(pool)
+
+    feats = builder.transform(evaluated, pool=pool)
+
+    assert feats["n_candidates"].tolist() == [3, 3]  # the pool of v1, not the two scored rows
+    changed = pool.copy()
+    changed.loc[changed["candidate_id"] == "c3", ["outcome", "resolved", "y"]] = [
+        "pending",
+        False,
+        0,
+    ]
+    pd.testing.assert_frame_equal(feats, builder.transform(evaluated, pool=changed))
+    # the same rows scored without the pool see a smaller, outcome-filtered vacancy
+    assert builder.transform(evaluated)["n_candidates"].tolist() == [2, 2]
+
+
+def test_every_evaluated_row_must_be_part_of_the_pool():
+    frame = basic_frame()
+    builder = small().fit(frame)
+
+    with pytest.raises(ValueError, match="part of the pool"):
+        builder.transform(frame, pool=frame.iloc[:-1])
+    with pytest.raises(ValueError, match="duplicate"):
+        builder.transform(frame, pool=pd.concat([frame, frame.iloc[[0]]]))
