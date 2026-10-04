@@ -44,17 +44,19 @@ def fold(text: str) -> str:
 
 # --- layers 1 and 2: labeled lines and patterns -------------------------------------------
 
-_YEAR_RANGE = re.compile(r"(?:19|20)\d{2}[\s.-](?:19|20)\d{2}")
+_YEAR_RANGE = re.compile(r"(?:19|20)\d{2}\s*[.\-–]?\s*(?:19|20)\d{2}")
 # looser: also a year pair split by a newline, which the independent estimate must not call a phone
 _YEAR_PAIR_LOOSE = re.compile(r"(?:19|20)\d{2}\s*[.-]?\s*(?:19|20)\d{2}")
 
 # Phone numbers are matched by several explicit shapes instead of one permissive regex,
 # because a permissive one also eats year ranges such as "2015-2018".
+_PSEP = r"[ \t.\-–]{0,3}"  # " - ", "-", " – ", "." between the digit groups
 _PHONE = re.compile(
-    r"(?:\+?55[\s.-]?)?\(\s?\d{2}\s?\)[\s.-]?9?[\s.-]?\d{4}[\s.-]?\d{4}"  # (11) 98765-4321
-    r"|\+55[\s.-]?\d{2}[\s.-]?9?[\s.-]?\d{4}[\s.-]?\d{4}"  # +55 11 98765 4321
-    r"|(?<![\d-])\d{2}[\s.-]9?\d{4}[\s.-]\d{4}(?![\d-])"  # 11 98765-4321
-    r"|(?<![\d-])9?\d{4}-\d{4}(?![\d-])"  # 98765-4321, 3333-4444
+    rf"(?:\+?55{_PSEP})?\(\s?\d{{2}}\s?\){_PSEP}9?{_PSEP}\d{{4}}{_PSEP}\d{{4}}"  # (11) 98765-4321
+    rf"|\+55{_PSEP}\d{{2}}{_PSEP}9?{_PSEP}\d{{4}}{_PSEP}\d{{4}}"  # +55 11 98765 4321
+    r"|(?<![\d-])\d{2}[ \t.-]9?\d{4}[ \t.\-–]{1,3}\d{4}(?![\d-])"  # 11 98765-4321
+    r"|(?<![\d-])9?\d{4}[ \t]?[-–][ \t]?\d{4}(?![\d-])"  # 98765-4321, 3333 - 4444
+    r"|(?<![\d-])\d{2}\)\s?9?[ \t.\-–]?\d{4}[ \t.\-–]{1,3}\d{4}(?![\d-])"  # 11) 98765-4321
     r"|(?<![\d-])9\d{4}[ .]\d{4}(?![\d-])"  # 98765 4321 (mobile, spaced)
     r"|(?<![\d-])[2-5]\d{3}[ .]\d{4}(?![\d-])"  # 3333 4444 (landline, spaced)
 )
@@ -119,13 +121,33 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         "ATTRIBUTE",  # marital status and number of children
         re.compile(
             r"\b(?:solteir[oa]s?|casad[oa]s?|divorciad[oa]s?|vi[uú]v[oa]s?"
-            r"|separad[oa]s? judicialmente|uni[aã]o est[aá]vel|\d{1,2} filh[oa]s?)\b",
+            r"|separad[oa]s? judicialmente|uni[aã]o est[aá]vel"
+            r"|(?:sem|com|\d{1,2}|um|uma|dois|duas|tr[eê]s) filh[oa]s?)\b",
             re.IGNORECASE,
         ),
     ),
     ("PHONE", _PHONE),
     ("NUMBER", re.compile(r"(?<!\d)\d{9,}(?!\d)")),
+    (
+        "ADDRESS",  # street + optional number; city and state are kept
+        re.compile(
+            r"\b(?:rua|r\.|avenida|av\.|alameda|travessa|rodovia|estrada|pra[cç]a)\s+"
+            r"[a-zà-ú0-9 .'\[\]-]{2,40}?(?:,?\s*(?:n[º°o.]?\s*)?\d{1,5})?"
+            r"(?=[,;\n]|\s[-–]\s|\.\s|$)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "LOCATION",  # neighborhood-level names; "parque tecnológico" is not one
+        re.compile(
+            r"\b(?:jardim|vila|residencial|bairro|loteamento|recanto|ch[aá]cara)\s+"
+            r"(?:(?:s[aã]o|santa|santo)\s+[a-zà-ú]{3,}|[a-zà-ú]{3,})"
+            r"(?:\s+(?:de|da|do|dos|das)\s+[a-zà-ú]{3,})?",
+            re.IGNORECASE,
+        ),
+    ),
 ]
+_BARE_AGE = re.compile(r"(?<![\w\[])(?:1[89]|[2-5]\d|6[0-5]) anos(?!\w)")
 _REPLACEMENT = {"ATTRIBUTE": _REDACTED}
 
 
@@ -156,7 +178,27 @@ def mask_patterns(text: str, stats: Counter | None = None) -> str:
             return _REPLACEMENT.get(label, f"[{label}]")
 
         text = pattern.sub(repl, text)
-    return text
+    return _mask_bare_ages(text, stats)
+
+
+def _mask_bare_ages(text: str, stats: Counter | None = None) -> str:
+    """ "34 anos" is an age only in a personal-data context: after a comma, bracket or line start
+    and before punctuation or a line end ("nascida em [DATE], 34 anos."). "mais de 10 anos de
+    experiência" and "com 15 anos de ..." are left alone."""
+
+    def repl(match: re.Match[str]) -> str:
+        before = text[max(0, match.start() - 14) : match.start()].rstrip(" \t")
+        after = text[match.end() : match.end() + 14].lstrip(" \t")
+        keyword = re.search(r"\b(?:tenho|idade)$", before)
+        left = not before or before[-1] in ",;(-–|/]:\n"
+        right = not after or after[0] in ",.;)|/\n-–["
+        if not (keyword or (left and right)):
+            return match.group()
+        if stats is not None:
+            stats["AGE"] += 1
+        return "[AGE]"
+
+    return _BARE_AGE.sub(repl, text)
 
 
 # --- independent residual check -----------------------------------------------------------
@@ -183,8 +225,15 @@ _INDEPENDENT_CHECKS: dict[str, re.Pattern[str]] = {
         r"(?im)^[ \t]*(?:nome(?: completo)?|endere[cç]o|telefone|celular|e-?mail)"
         r"[ \t]*\n[ \t]*(?!\[)\S"
     ),
+    "age_like": re.compile(r"(?:^|[,;(\n])[ \t]*\d{2} anos[ \t]*(?:[,.;)\n]|$)", re.MULTILINE),
+    "street_like": re.compile(r"\b(?:rua|avenida|alameda|travessa|rodovia)[ \t]+\w", re.IGNORECASE),
+    "neighborhood_like": re.compile(
+        r"\b(?:jardim|vila|bairro|residencial)[ \t]+[^\W\d_]{3}", re.IGNORECASE
+    ),
     "marital_or_children": re.compile(
-        r"\b(?:solteir|casad|divorciad|viuv|viúv)[oa]s?\b|\b\d+ filh[oa]s?\b", re.IGNORECASE
+        r"\b(?:solteir|casad|divorciad|viuv|viúv)[oa]s?\b|\b\d+ filh[oa]s?\b"
+        r"|\bsem filhos\b|\b(?:um|uma|dois|duas) filh[oa]s?\b",
+        re.IGNORECASE,
     ),
 }
 
@@ -276,6 +325,14 @@ def mask_own_name(text: str, name: str | None, stats: Counter | None = None) -> 
 
 _SAINT = {"sao", "santo", "santa"}  # "são paulo" is a place, not a person
 _PARTICLES = {"da", "de", "do", "das", "dos"}
+_MAX_UNKNOWN = 2  # unknown (surname-like) words a chain may absorb
+# Unknown surnames are only trusted near the top of a text, where a person's own name sits; deeper
+# in a CV an unknown word after a first name is more often an employer or a school.
+_HEADER_CHARS = 400
+_ALWAYS_KNOWN = frozenset(
+    "janeiro fevereiro marco abril maio junho julho agosto setembro outubro novembro dezembro "
+    "ltda eireli cia companhia universidade faculdade instituto centro escola colegio".split()
+)
 _TOKEN = re.compile(r"[^\W\d_]+")
 _GAP = re.compile(r"[ \t\-–]+")
 
@@ -286,14 +343,21 @@ class NameDictionary:
 
     first_names: frozenset[str]
     name_tokens: frozenset[str]
+    # Ordinary vocabulary. When given, a word that is NOT in it may continue a chain as an
+    # unknown surname ("marcela lucindo"); without it only known name tokens continue one.
+    known_words: frozenset[str] = frozenset()
 
     @classmethod
     def build(
-        cls, first_names: Iterable[str], extra_tokens: Iterable[str] = ()
+        cls,
+        first_names: Iterable[str],
+        extra_tokens: Iterable[str] = (),
+        known_words: Iterable[str] = (),
     ) -> "NameDictionary":
         first = frozenset(t for t in map(fold, first_names) if len(t) >= 3)
         extra = frozenset(t for t in map(fold, extra_tokens) if len(t) >= 3)
-        return cls(first, first | extra)
+        words = frozenset(t for t in map(fold, known_words) if len(t) >= 3)
+        return cls(first, first | extra, words | _ALWAYS_KNOWN if words else words)
 
 
 def load_ibge_first_names(path: Path, top_k: int = 3000) -> list[str]:
@@ -331,7 +395,7 @@ def mask_name_chains(text: str, dictionary: NameDictionary, stats: Counter | Non
             and word not in _SAINT
             and not (i > 0 and tokens[i - 1][0] in _SAINT)
         ):
-            last, count, j = i, 1, i + 1
+            last, count, j, unknown = i, 1, i + 1, 0
             while j < len(tokens) and count < 4:
                 if not _GAP.fullmatch(text[tokens[j - 1][2] : tokens[j][1]]):
                     break
@@ -344,6 +408,15 @@ def mask_name_chains(text: str, dictionary: NameDictionary, stats: Counter | Non
                         continue
                 if nxt in dictionary.name_tokens and len(nxt) >= 3:
                     last, count, j = j, count + 1, j + 1
+                elif (
+                    dictionary.known_words
+                    and tokens[i][1] < _HEADER_CHARS
+                    and unknown < _MAX_UNKNOWN
+                    and len(nxt) >= 4
+                    and nxt not in dictionary.known_words
+                    and nxt not in _PARTICLES
+                ):
+                    last, count, j, unknown = j, count + 1, j + 1, unknown + 1
                 else:
                     break
             if count >= 2:

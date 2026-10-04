@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import tempfile
@@ -54,7 +55,9 @@ RAW_DIR = Path(os.getenv("RAW_ARCHIVE_DIR", "datathon data"))
 OUT_DIR = Path("data/masked")
 FIRST_NAMES_CSV = Path(os.getenv("FIRST_NAMES_CSV", "data/reference/nomes-censos-ibge.csv"))
 POLICY_VERSION = 2
+_WORD_RE = re.compile(r"[^\W\d_]+")
 PROTECTED_MIN_DF = 30  # tokens in at least this many short texts are generic, not names
+KNOWN_WORD_MIN_DF = 3  # vacancy words in at least this many vacancies count as ordinary vocabulary
 MIN_SALT_BYTES = 16
 
 HIRED_STATUSES = {"Contratado pela Decision", "Contratado como Hunting", "Proposta Aceita"}
@@ -279,7 +282,26 @@ def build_name_dictionary(
     for v in vagas.values():
         for field in STAFF_NAME_FIELDS:
             pool.update(name_tokens(dig(v, "informacoes_basicas", field)))
-    return NameDictionary.build(load_ibge_first_names(first_names_csv, top_k), pool)
+    return NameDictionary.build(
+        load_ibge_first_names(first_names_csv, top_k), pool, vacancy_vocabulary(vagas)
+    )
+
+
+def vacancy_vocabulary(vagas: dict) -> set[str]:
+    """Ordinary words: those used in several vacancy texts. A word outside this set that follows
+    a first name is treated as a surname."""
+    seen: Counter = Counter()
+    for v in vagas.values():
+        text = " ".join(
+            str(x or "")
+            for x in (
+                dig(v, "informacoes_basicas", "titulo_vaga"),
+                dig(v, "perfil_vaga", "principais_atividades"),
+                dig(v, "perfil_vaga", "competencia_tecnicas_e_comportamentais"),
+            )
+        )
+        seen.update({fold(w) for w in _WORD_RE.findall(text)})
+    return {w for w, n in seen.items() if n >= KNOWN_WORD_MIN_DF}
 
 
 # --- report (aggregates only) ---------------------------------------------------------------

@@ -135,6 +135,56 @@ def test_independent_estimate_ignores_year_pairs_split_by_a_newline():
     assert counts["phone_like"] == 1  # only the real number
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "cel.: (11) 94547 - 9889",
+        "(11) 94547– 9889",
+        "tel (11)94547 – 9889",
+        "11 94547 - 9889",
+        "11) 9 4547 9889",
+    ],
+)
+def test_phones_with_spaced_or_en_dash_separators_are_masked(text):
+    assert "9889" not in mask_patterns(text)
+
+
+def test_year_ranges_with_spaced_dashes_are_not_phones():
+    for text in ("2015 - 2018", "2015 – 2018", "jan 2015 - 2018"):
+        assert mask_patterns(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("nascida em [DATE], 34 anos.", "nascida em [DATE], [AGE]."),
+        ("brasileiro, 34 anos, [REDACTED]", "brasileiro, [AGE], [REDACTED]"),
+        ("tenho 41 anos e moro em sp", "tenho [AGE] e moro em sp"),
+        ("mais de 10 anos de experiência", "mais de 10 anos de experiência"),
+        ("atuo há 20 anos na área", "atuo há 20 anos na área"),
+        ("com 15 anos de mercado", "com 15 anos de mercado"),
+        ("5 anos de experiência", "5 anos de experiência"),
+    ],
+)
+def test_bare_ages_are_masked_only_in_a_personal_data_context(text, expected):
+    assert mask_patterns(text) == expected
+
+
+def test_children_and_family_phrases_are_masked():
+    assert mask_patterns("casada, sem filhos") == "[REDACTED], [REDACTED]"
+    assert mask_patterns("pai de dois filhos") == "pai de [REDACTED]"
+
+
+def test_street_addresses_and_neighborhoods_are_masked_but_cities_and_parks_stay():
+    assert mask_patterns("rua das flores, 123, campinas") == "[ADDRESS], campinas"
+    assert mask_patterns("avenida paulista 1000 - sao paulo") == "[ADDRESS] - sao paulo"
+    assert mask_patterns("mora no jardim são sebastião, hortolândia") == (
+        "mora no [LOCATION], hortolândia"
+    )
+    assert mask_patterns("avenida [NAME], 1000, sp") == "[ADDRESS], sp"
+    assert mask_patterns("parque tecnológico de são josé") == "parque tecnológico de são josé"
+
+
 def test_redaction_is_idempotent_and_counted_once():
     stats: Counter = Counter()
 
@@ -273,6 +323,25 @@ def test_name_chains_do_not_mask_saint_places():
     for text in ("moro em santo andré", "sede em santa catarina", "unidade santo andre sp"):
         assert mask_name_chains(text, places) == text
     assert mask_name_chains("falei com maria catarina", places) == "falei com [NAME]"
+
+
+def test_unknown_surnames_after_a_first_name_are_masked_near_the_top_only():
+    words = ["analista", "vendas", "gerente", "projetos"]
+    open_dict = NameDictionary.build(["marcela", "maria"], ["silva"], known_words=words)
+
+    assert mask_name_chains("marcela lucindo\nanalista de vendas", open_dict) == (
+        "[NAME]\nanalista de vendas"
+    )
+    assert mask_name_chains("maria silva lucindo mesquita santos", open_dict) == "[NAME] santos"
+    # a known word is never a surname, and a first name alone is not a chain
+    assert mask_name_chains("maria gerente de projetos", open_dict) == "maria gerente de projetos"
+    assert mask_name_chains("maria julho", open_dict) == "maria julho"  # months are ordinary words
+    # deep in the text an unknown word after a first name is more likely an employer or a school
+    deep = "analista de vendas " * 40 + "carlos lucindo"
+    assert mask_name_chains(deep, open_dict) == deep
+    # and without a vocabulary the rule is off
+    plain = NameDictionary.build(["marcela"], [])
+    assert mask_name_chains("marcela lucindo", plain) == "marcela lucindo"
 
 
 def test_name_chain_stats_are_counted():
