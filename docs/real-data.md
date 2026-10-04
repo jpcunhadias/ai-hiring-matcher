@@ -1,7 +1,25 @@
 # Modeling on the masked real data
 
-The loader (`src/masked_data.py`) reads only `data/masked/` (see [masking.md](masking.md)) and
-turns candidacies into labeled (vacancy, candidate) pairs.
+## The data and the constraint
+
+Three exports from an applicant tracking system (vacancies, candidates, and the candidacies that
+link them), Portuguese-language, dated 2018-12 to 2025-03: 14,081 vacancies, 42,482 applicants,
+53,759 candidacies. What shapes everything else:
+
+* **77.7% of candidacy outcomes are still pending** (16.8% rejected or withdrawn, 5.6% hired). A
+  pending candidacy is not a negative, so the labels are censored.
+* **Structured applicant fields are 81-100% empty** (education, English, area, seniority). The
+  CV text, present for 68% of applicants, carries almost all the signal. All CVs are lowercase.
+* Only about 980 vacancies can be ranked at all (at least two candidates and one hire), and 490
+  when only resolved outcomes are counted.
+* The provider randomized the structured names, phones and emails, but real names, phones and
+  addresses are still inside the CV text ([masking.md](masking.md) covers how they are handled).
+
+The data cannot be published, so the architecture is a private store plus public code, aggregate
+results and write-ups instead of "anyone can clone and run".
+
+The loader (`src/masked_data.py`) reads only `data/masked/` and turns candidacies into labeled
+(vacancy, candidate) pairs.
 
 ```bash
 make data-summary     # aggregates per label setting and the temporal split
@@ -52,13 +70,14 @@ pool, not a replay of the moment each candidate applied.
 
 ## Features (`src/features.py`)
 
-1. **Text match** (per pair): TF-IDF cosine on words and on character n-grams, BM25, and
-   multilingual-e5 cosine (CV chunked, best chunk against the vacancy); overlap between the
-   applicant's skills and the vacancy competencies; similarity of professional title and
-   vacancy title.
-2. **Structured match**: seniority, education and English gaps (ordinal), area match, SAP
-   vacancy against an SAP-area applicant, state. Applicant fields are 81-100% empty, so a
-   "was filled in" indicator goes with each.
+1. **Text match** (per pair): TF-IDF cosine on words and on character n-grams, how many of a
+   vacancy's distinctive words appear in the CV and in the skills field, and the similarity of
+   the applicant's professional title to the vacancy title. An optional multilingual-e5 cosine
+   (the CV truncated to 512 tokens) via an injected encoder.
+2. **Structured match**: education, English and Spanish gaps (ordinal), area match (exact and
+   broad group), SAP vacancy against an SAP-area applicant, and whether the vacancy's seniority
+   word appears in the CV. Applicant fields are 81-100% empty, so a "was filled in" indicator
+   goes with each.
 3. **Within-vacancy context**: each score as a z-score and rank among that vacancy's
    candidates, the number of candidates, CV length (a confound check: length alone showed no signal).
 4. **History, computed only from the past**: an applicant's earlier candidacies and hires and a
@@ -139,3 +158,24 @@ What the numbers do and do not say:
 Honest summary: the data supports a small text-matching signal (about +4 points of hit@1) that a
 plain TF-IDF rule already captures; engineered structured features and a supervised model add,
 at best, a few points that the available test vacancies cannot confirm.
+
+## Two leaks found in review
+
+Both let the future reach the training set, and fixing them removed the apparent signals of an
+earlier draft (for example an education gap at +6 points of top-1 gain):
+
+1. Selecting rankable vacancies *before* the split let a hire recorded after the cutoff decide
+   what the training set contained. The split now comes first and the labels are rebuilt as of
+   the cutoff.
+2. The within-vacancy context was computed over a pool that depended on which candidates had
+   been resolved. It is now computed over the whole pool, whatever the outcome of its members.
+
+The guards are mutation-checked: each protection was deleted in turn and the tests failed.
+
+## What I would do next
+
+* A pairwise or lambda-rank objective, and the embedding feature (`make rank ARGS=--embed`).
+* More outcomes: much of the censoring is recent, so the same pipeline would be re-run as
+  outcomes resolve.
+* Treat any result as a decision-support signal at most, never an automatic screen (see the
+  README's Responsible use section).
