@@ -1,6 +1,8 @@
+import math
 from dataclasses import dataclass
 
 import pandas as pd
+from scipy.stats import chi2_contingency
 from sklearn.linear_model import LinearRegression
 
 from src.utils import logger
@@ -15,6 +17,8 @@ class FairnessReport:
     residual_gap: pd.DataFrame
     bimodality: dict
     proba_range: tuple[float, float]
+    retrieval_by_group: pd.DataFrame
+    retrieval_pvalues: dict
 
 
 def label_selection_rates(df: pd.DataFrame, target_col: str = "Best Match") -> pd.DataFrame:
@@ -85,6 +89,49 @@ def gender_rate_bimodality(
     }
 
 
+def retrieval_accuracy_by_group(df: pd.DataFrame, rank_col: str = "retrieval_rank") -> pd.DataFrame:
+    """Share of resumes whose own job role is ranked first, per demographic group.
+
+    The matcher is built without demographic inputs, but "no protected attributes as
+    features" is not the same as "equal accuracy for everyone", so measure it. std_error
+    is the binomial standard error, to judge whether a gap is more than sampling noise.
+    """
+    rows = []
+    for col in DEMOGRAPHIC_COLUMNS:
+        for group, ranks in df.groupby(col)[rank_col]:
+            n = len(ranks)
+            p = float((ranks <= 1).mean())
+            rows.append(
+                {
+                    "attribute": col,
+                    "group": group,
+                    "n": n,
+                    "recall_at_1": p,
+                    "std_error": math.sqrt(p * (1 - p) / n),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def retrieval_homogeneity_pvalues(
+    df: pd.DataFrame, rank_col: str = "retrieval_rank"
+) -> dict[str, float]:
+    """Chi-square p-value per attribute for "recall@1 is the same in every group".
+
+    A large p-value means the observed gaps are what sampling noise alone produces.
+    With no variation in hits (all or none) or a single group there is nothing to
+    differ, so p = 1.
+    """
+    hit = df[rank_col] <= 1
+    pvalues = {}
+    for col in DEMOGRAPHIC_COLUMNS:
+        table = pd.crosstab(df[col], hit)
+        pvalues[col] = (
+            1.0 if table.shape[0] < 2 or table.shape[1] < 2 else float(chi2_contingency(table)[1])
+        )
+    return pvalues
+
+
 def residual_gap_by_group(
     df: pd.DataFrame,
     proba_col: str = "best_match_proba",
@@ -126,6 +173,12 @@ def run_fairness_audit(df: pd.DataFrame) -> FairnessReport:
         residual_gap=residual_gap_by_group(df),
         bimodality=gender_rate_bimodality(df) if "Job Roles" in df.columns else {},
         proba_range=(float(df["best_match_proba"].min()), float(df["best_match_proba"].max())),
+        retrieval_by_group=(
+            retrieval_accuracy_by_group(df) if "retrieval_rank" in df.columns else pd.DataFrame()
+        ),
+        retrieval_pvalues=(
+            retrieval_homogeneity_pvalues(df) if "retrieval_rank" in df.columns else {}
+        ),
     )
 
     max_gap = report.label_selection_rate.loc[
@@ -163,6 +216,23 @@ def render_fairness_report(report: FairnessReport) -> str:
             "gaps near zero are therefore expected and are *not* evidence that the matcher "
             "is fair.\n"
         )
+
+    retrieval_section: list[str] = []
+    if not report.retrieval_by_group.empty:
+        retrieval_section = [
+            "## Retrieval accuracy by group",
+            "",
+            "Share of resumes whose own job role the matcher ranks first (recall@1), per "
+            "group. `std_error` is the binomial standard error: gaps within about two "
+            "standard errors are indistinguishable from sampling noise.",
+            "",
+            report.retrieval_by_group.to_markdown(index=False),
+            "",
+            "Chi-square test that recall@1 is equal across groups: "
+            + ", ".join(f"{attr} p = {p:.2f}" for attr, p in report.retrieval_pvalues.items())
+            + ". A large p-value means the gaps are what sampling noise alone would produce.",
+            "",
+        ]
 
     lines = [
         "# Fairness Audit",
@@ -206,5 +276,6 @@ def render_fairness_report(report: FairnessReport) -> str:
         "",
         report.residual_gap.to_markdown(index=False),
         "",
+        *retrieval_section,
     ]
     return "\n".join(lines)

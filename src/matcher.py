@@ -44,13 +44,10 @@ def rank_jobs(resume_embedding: np.ndarray, catalog: JobCatalog, top_n: int = 5)
     )
 
 
-def evaluate_retrieval(
-    resume_embeddings: np.ndarray,
-    true_roles: list[str],
-    catalog: JobCatalog,
-    k_values: tuple[int, ...] = (1, 5),
-) -> dict:
-    """Recall@k and MRR for ranking each resume's true Job Roles among the 51 known jobs."""
+def retrieval_ranks(
+    resume_embeddings: np.ndarray, true_roles: list[str], catalog: JobCatalog
+) -> np.ndarray:
+    """1-based rank of each resume's true Job Roles among the catalog's jobs."""
     role_to_idx = {role: i for i, role in enumerate(catalog.roles)}
     scores_matrix = resume_embeddings @ catalog.embeddings.T  # (n_resumes, n_jobs)
     orders = np.argsort(-scores_matrix, axis=1)
@@ -59,6 +56,17 @@ def evaluate_retrieval(
     for i, role in enumerate(true_roles):
         true_idx = role_to_idx[role]
         ranks[i] = int(np.where(orders[i] == true_idx)[0][0]) + 1
+    return ranks
+
+
+def evaluate_retrieval(
+    resume_embeddings: np.ndarray,
+    true_roles: list[str],
+    catalog: JobCatalog,
+    k_values: tuple[int, ...] = (1, 5),
+) -> dict:
+    """Recall@k and MRR for ranking each resume's true Job Roles among the 51 known jobs."""
+    ranks = retrieval_ranks(resume_embeddings, true_roles, catalog)
 
     # Named recall_at_k (not recall@k): mlflow metric names reject "@".
     metrics = {f"recall_at_{k}": float(np.mean(ranks <= k)) for k in k_values}

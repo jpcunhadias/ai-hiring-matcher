@@ -6,6 +6,8 @@ from src.fairness_audit import (
     label_selection_rates,
     render_fairness_report,
     residual_gap_by_group,
+    retrieval_accuracy_by_group,
+    retrieval_homogeneity_pvalues,
     run_fairness_audit,
 )
 
@@ -90,3 +92,52 @@ def test_report_has_no_warning_when_probabilities_spread():
     text = render_fairness_report(run_fairness_audit(_sample_df()))
 
     assert "not* evidence" not in text
+
+
+def test_retrieval_accuracy_by_group_counts_rank_one_per_group():
+    df = _sample_df()
+    # Male rows are ranked first, Female rows are not.
+    df["retrieval_rank"] = [1, 1, 3, 2]
+
+    table = retrieval_accuracy_by_group(df)
+
+    gender = table[table["attribute"] == "Gender"].set_index("group")
+    assert gender.loc["Male", "recall_at_1"] == 1.0
+    assert gender.loc["Female", "recall_at_1"] == 0.0
+    assert gender.loc["Male", "n"] == 2
+    assert gender.loc["Male", "std_error"] == 0.0
+
+
+def test_report_includes_retrieval_section_only_when_ranks_present():
+    without = render_fairness_report(run_fairness_audit(_sample_df()))
+    df = _sample_df()
+    df["retrieval_rank"] = [1, 1, 3, 2]
+    with_ranks = render_fairness_report(run_fairness_audit(df))
+
+    assert "Retrieval accuracy by group" not in without
+    assert "Retrieval accuracy by group" in with_ranks
+
+
+def test_homogeneity_pvalue_is_small_for_a_real_gap_and_large_for_none():
+    rows = []
+    for gender, hits in (("Male", 90), ("Female", 10)):
+        rows += [
+            {
+                "Gender": gender,
+                "Race": "A",
+                "Ethnicity": "X",
+                "retrieval_rank": 1 if i < hits else 2,
+            }
+            for i in range(100)
+        ]
+    gap = retrieval_homogeneity_pvalues(pd.DataFrame(rows))
+
+    assert gap["Gender"] < 0.001
+    assert gap["Race"] == 1.0  # a single group has nothing to differ from
+
+
+def test_homogeneity_pvalue_handles_no_variation_in_hits():
+    df = _sample_df()
+    df["retrieval_rank"] = [1, 1, 1, 1]
+
+    assert retrieval_homogeneity_pvalues(df) == {"Gender": 1.0, "Race": 1.0, "Ethnicity": 1.0}

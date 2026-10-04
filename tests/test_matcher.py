@@ -1,7 +1,13 @@
 import numpy as np
 import pandas as pd
 
-from src.matcher import JobCatalog, build_job_catalog_from_df, evaluate_retrieval, rank_jobs
+from src.matcher import (
+    JobCatalog,
+    build_job_catalog_from_df,
+    evaluate_retrieval,
+    rank_jobs,
+    retrieval_ranks,
+)
 
 
 def _unit(vector: list[float]) -> np.ndarray:
@@ -58,3 +64,16 @@ def test_build_job_catalog_from_df_dedupes_job_roles(monkeypatch):
 
     assert catalog.roles == ["Nurse", "Pilot"]
     assert catalog.embeddings.shape == (2, 2)
+
+
+def test_retrieval_ranks_are_one_based_positions_of_the_true_role():
+    catalog = JobCatalog(
+        roles=["Nurse", "Pilot", "Chef"],
+        descriptions=["...", "...", "..."],
+        embeddings=np.stack([_unit([1, 0, 0]), _unit([0, 1, 0]), _unit([0, 0, 1])]),
+    )
+    resume_embeddings = np.stack([_unit([1, 0, 0]), _unit([0, 0.6, 0.8])])
+
+    ranks = retrieval_ranks(resume_embeddings, ["Nurse", "Pilot"], catalog)
+
+    assert ranks.tolist() == [1, 2]
