@@ -18,7 +18,12 @@ from src.data_preparation import (
 )
 from src.embeddings import embed_texts
 from src.fairness_audit import render_fairness_report, run_fairness_audit
-from src.matcher import JobCatalog, build_job_catalog_from_df, evaluate_retrieval
+from src.matcher import (
+    JobCatalog,
+    build_job_catalog_from_df,
+    evaluate_retrieval,
+    retrieval_ranks,
+)
 from src.utils import MODELS_DIR, REPORTS_DIR, logger, save_df, save_model
 
 MLFLOW_EXPERIMENT = "ai-hiring-matcher"
@@ -138,6 +143,9 @@ def main() -> None:
         for col in ("Gender", "Race", "Ethnicity", "Job Roles"):
             fairness_input[col] = df[col].values
         fairness_input["Best Match"] = df["Best Match"].values
+        fairness_input["retrieval_rank"] = retrieval_ranks(
+            resume_embeddings, df["Job Roles"].tolist(), catalog
+        )
 
         fairness_report = run_fairness_audit(fairness_input)
         report_text = render_fairness_report(fairness_report)
