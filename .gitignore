@@ -38,6 +38,7 @@ models/
 # that came from a third-party source rather than this project's own pipeline.
 data/processed/
 data/logs/
+data/masked/
 
 # Real challenge data (applicants, vacancies, prospects): personal data, never commit.
 datathon data/
