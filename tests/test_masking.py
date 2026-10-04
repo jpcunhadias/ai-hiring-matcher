@@ -1,10 +1,16 @@
 from collections import Counter
+from datetime import date
 
 import pytest
 
 from src.masking import (
     HFEntityMasker,
+    NameDictionary,
     age_band,
+    fold,
+    independent_residual_counts,
+    load_ibge_first_names,
+    mask_name_chains,
     mask_own_name,
     mask_patterns,
     mask_texts,
@@ -13,6 +19,8 @@ from src.masking import (
     surrogate_id,
     to_month,
 )
+
+# --- patterns -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -25,12 +33,20 @@ from src.masking import (
         ("call +55 11 98765-4321", "[PHONE]"),
         ("call 11 98765-4321", "[PHONE]"),
         ("call 3333-4444", "[PHONE]"),
-        ("cpf 123.456.789-09", "[ID]"),
+        ("call 98765 4321", "[PHONE]"),  # spaced mobile
+        ("call 3333 4444", "[PHONE]"),  # spaced landline
+        ("cpf 123.456.789-09", "[REDACTED]"),  # a labeled value is redacted whatever it is
+        ("o documento 123.456.789-09", "[ID]"),
         ("cnpj 12.345.678/0001-95", "[ID]"),
+        ("o rg 12 345 678 9 foi", "[REDACTED]"),
+        ("documento 12 345 678 9 aqui", "[ID]"),  # spaced RG
         ("cep 01310-100", "[POSTCODE]"),
         ("born 05/03/1990", "[DATE]"),
         ("born 05-03-90", "[DATE]"),
+        ("born 1990-04-02", "[DATE]"),  # ISO date
         ("id 12345678901", "[NUMBER]"),
+        ("sou casado há anos", "[REDACTED]"),  # marital status, with or without a label
+        ("tenho 2 filhos", "[REDACTED]"),
     ],
 )
 def test_patterns_are_masked(raw, placeholder):
@@ -49,6 +65,7 @@ def test_patterns_are_masked(raw, placeholder):
         "Desde 03/2019 até jan/2021",
         "Python 3.12 e SQL",
         "Gerenciou 120 pessoas e 15 projetos",
+        "equipe separada por área",
     ],
 )
 def test_ordinary_text_with_numbers_is_left_alone(text):
@@ -64,45 +81,224 @@ def test_pattern_stats_are_counted():
     assert stats["PHONE"] == 1
 
 
-def test_own_name_is_removed_case_and_accent_insensitively():
-    masked = mask_own_name("JOAO da Silva e joão trabalharam. Silvana ficou.", "João da Silva")
+@pytest.mark.parametrize(
+    ("raw", "kept", "gone"),
+    [
+        ("Estado civil: Casado\nPython", "Estado civil:", "Casado"),
+        ("Data de nascimento: 12 de março de 1990", "Data de nascimento:", "março"),
+        ("Bairro: Vila Mariana, São Paulo", "Bairro:", "Vila"),
+        ("Idade: 32 anos, Solteiro, 5 anos de experiência", "5 anos de experiência", "32"),
+        ("Nome:\nFulano de Tal\nExperiência", "Experiência", "Fulano"),
+        ("NOME - Fulano de Tal", "NOME", "Fulano"),
+        ("Nacionalidade: Brasileira | Cidade: Recife", "Nacionalidade:", "Recife"),
+        ("Endereço = Rua das Flores 12", "Endereço", "Flores"),  # '=' separator
+        ("Nome\nFulano de Tal\nExperiência", "Experiência", "Fulano"),  # no separator at all
+        ("idade 32 e python", "python", "32"),  # label then number, no separator
+        ("nascimento 12 03 1990 fim", "fim", "1990"),
+        ("Estado civil: Casado, 2 filhos", "Estado civil:", "filhos"),
+    ],
+)
+def test_labeled_personal_data_values_are_redacted(raw, kept, gone):
+    masked = mask_patterns(raw)
 
-    assert "JOAO" not in masked and "Silva " not in masked and "joão" not in masked
+    assert kept in masked and gone not in masked
+    assert "[REDACTED]" in masked
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Experiência em Intel: drivers",  # 'tel' inside a word is not a label
+        "País: Brasil",  # 'pai' inside a word is not a label
+        "Qualidade: alta, 10 anos de experiência",  # 'idade' inside a word
+        "Python: avançado\nSQL: intermediário",
+        "nome do projeto era alfa",  # a label word without separator inside a sentence
+    ],
+)
+def test_labels_inside_other_words_do_not_trigger(text):
+    assert mask_patterns(text) == text
+
+
+def test_written_out_dates_and_ages_are_masked():
+    assert mask_patterns("nascido em 5 de março de 1990") == "nascido em [DATE]"
+    assert mask_patterns("tenho 32 anos de idade") == "tenho [AGE]"
+
+
+def test_numeric_dates_glued_to_letters_are_masked():
+    assert mask_patterns("nasc12/05/1990") == "nasc[DATE]"
+    assert mask_patterns("em 12/05/1990a") == "em [DATE]a"
+
+
+def test_independent_estimate_ignores_year_pairs_split_by_a_newline():
+    counts = independent_residual_counts(["formacao\n2010\n2012", "tel 3333 4444"])
+
+    assert counts["phone_like"] == 1  # only the real number
+
+
+def test_redaction_is_idempotent_and_counted_once():
+    stats: Counter = Counter()
+
+    once = mask_patterns("Estado civil: Casado", stats)
+    twice = mask_patterns(once, stats)
+
+    assert once == twice == "Estado civil: [REDACTED]"
+    assert stats["LABELED"] == 1
+
+
+def test_self_consistency_check_reports_unredacted_labeled_values():
+    assert residual_pattern_counts(["Estado civil: Casado"])["LABELED"] == 1
+    assert residual_pattern_counts(["Estado civil: [REDACTED]"])["LABELED"] == 0
+
+
+# --- independent residual check -----------------------------------------------------------
+
+
+def test_independent_check_is_quiet_on_clean_text_and_year_ranges():
+    clean = ["experiência 2015-2018 em python", "contato com a equipe de vendas", "tel aviv"]
+
+    assert sum(independent_residual_counts(clean).values()) == 0
+
+
+@pytest.mark.parametrize(
+    ("leak", "check"),
+    [
+        ("fale com a@b.com", "email_or_at_sign"),
+        ("nasceu em 1990-04-02", "iso_date"),
+        ("ligue 98765 4321", "phone_like"),
+        ("estado civil: casado", "labeled_value"),
+        ("idade 32", "label_then_digits"),
+        ("nome\nfulano de tal", "label_alone_then_text"),
+        ("tem 2 filhos", "marital_or_children"),
+    ],
+)
+def test_independent_check_catches_what_slipped_through(leak, check):
+    assert independent_residual_counts([leak])[check] == 1
+
+
+def test_independent_check_does_not_just_echo_the_masker():
+    # An ISO date is exactly the kind of thing the (old) masker patterns missed; masking it
+    # now means the independent check must see nothing left.
+    assert independent_residual_counts([mask_patterns("nasceu em 1990-04-02")])["iso_date"] == 0
+
+
+# --- accent folding and the person's own name ---------------------------------------------
+
+
+def test_fold_keeps_the_length_so_offsets_stay_valid():
+    text = "João Conceição ÁÉÍÓÚ çãõ İstanbul"
+
+    assert len(fold(text)) == len(text)
+    assert fold("João") == "joao"
+
+
+def test_own_name_is_removed_case_and_accent_insensitively():
+    masked = mask_own_name(
+        "JOAO da Silva e joão trabalharam em casa da vovó. Silvana ficou.", "João da Silva"
+    )
+
+    assert masked.startswith("[NAME] e [NAME] trabalharam")  # the whole name goes as one unit
     assert "Silvana" in masked  # a different word that merely contains the token
-    assert " da " in masked  # particles are not treated as name tokens
+    assert "casa da vovó" in masked  # an unrelated "da" is not touched
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("Joao Silva", "falei com João Silva ontem"),  # accent in the text, none in the record
+        ("João Silva", "falei com joao silva ontem"),  # and the other way around
+        ("JOÃO SILVA", "falei com joão silva ontem"),
+    ],
+)
+def test_own_name_matching_is_accent_insensitive_in_both_directions(name, text):
+    masked = mask_own_name(text, name)
+
+    assert "silva" not in masked.lower() and "joão" not in masked.lower()
+    assert "falei com" in masked
+
+
+def test_short_names_are_masked_as_a_whole_phrase():
+    assert mask_own_name("contato li wu hoje", "Li Wu") == "contato [NAME] hoje"
+
+
+def test_own_name_stats_count_each_masked_span():
+    stats: Counter = Counter()
+
+    mask_own_name("maria souza e maria", "Maria Souza", stats)
+
+    assert stats["OWN_NAME"] >= 2
 
 
 def test_name_tokens_skip_particles_and_short_words():
-    assert name_tokens("Maria de Fátima dos Santos Jr") == ["Maria", "Fátima", "Santos"]
+    assert name_tokens("Maria de Fátima dos Santos Jr") == ["maria", "fatima", "santos"]
     assert name_tokens(None) == []
 
 
-def test_residual_check_finds_what_the_masker_missed():
-    clean = ["nothing here", "Analista 2015-2018"]
-    leaky = ["mail me: x@y.com"]
+# --- name chains from a dictionary --------------------------------------------------------
 
-    assert sum(residual_pattern_counts(clean).values()) == 0
-    assert residual_pattern_counts(leaky)["EMAIL"] == 1
+D = NameDictionary.build(["Maria", "João", "Ana", "Paulo"], extra_tokens=["Silva", "Santos"])
 
 
-def test_surrogate_id_is_stable_salted_and_namespaced():
-    salt = b"s" * 32
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("falei com maria silva ontem", "falei com [NAME] ontem"),
+        ("falei com joão da silva ontem", "falei com [NAME] ontem"),  # particle inside
+        ("falei com joao silva santos hoje", "falei com [NAME] hoje"),  # accent-insensitive
+        ("maria silva santos ana joao", "[NAME] joao"),  # a chain is capped at 4 tokens
+        ("paulo silva", "[NAME]"),
+    ],
+)
+def test_name_chains_are_masked(raw, expected):
+    assert mask_name_chains(raw, D) == expected
 
-    assert surrogate_id("cand", "42", salt) == surrogate_id("cand", "42", salt)
-    assert surrogate_id("cand", "42", salt) != surrogate_id("cand", "42", b"t" * 32)
-    assert surrogate_id("cand", "42", salt) != surrogate_id("vac", "42", salt)
-    assert surrogate_id("cand", "42", salt) != "42"
-    assert surrogate_id("cand", "", salt) == ""
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "falei com maria ontem",  # a lone first name is not a chain
+        "maria\nsilva",  # a line break ends a chain
+        "maria, silva",  # so does a comma: two different people
+        "moro em são paulo silva",  # "são paulo" is a place, not a person
+        "silva maria",  # a chain must START with a first name
+        "analista de sistemas",
+    ],
+)
+def test_name_chains_leave_non_names_alone(text):
+    assert mask_name_chains(text, D) == text
 
 
-def test_dates_are_generalized():
-    assert to_month("05-03-2021") == "2021-03"
-    assert to_month("1990-04-02") == "1990-04"
-    assert to_month("") is None
-    assert to_month("not a date") is None
-    assert age_band("1990-04-02") == "35-44"
-    assert age_band("2015-01-01") is None  # implausible age -> missing, not kept
-    assert age_band("") is None
+def test_name_chains_do_not_mask_saint_places():
+    places = NameDictionary.build(["santo", "santa", "andre", "catarina", "maria"], [])
+
+    for text in ("moro em santo andré", "sede em santa catarina", "unidade santo andre sp"):
+        assert mask_name_chains(text, places) == text
+    assert mask_name_chains("falei com maria catarina", places) == "falei com [NAME]"
+
+
+def test_name_chain_stats_are_counted():
+    stats: Counter = Counter()
+
+    mask_name_chains("maria silva e joão santos", D, stats)
+
+    assert stats["NAME_CHAIN"] == 2
+
+
+def test_ibge_loader_takes_the_most_common_names_and_skips_blank_rows(tmp_path):
+    csv_path = tmp_path / "names.csv"
+    csv_path.write_text(
+        "Nome,ate1930,ate1940\nMARIA,100,200\nRARO,1,\n\nANA,50,60\n,5,5\n", encoding="utf-8"
+    )
+
+    assert load_ibge_first_names(csv_path, top_k=2) == ["MARIA", "ANA"]
+
+
+def test_dictionary_ignores_tokens_shorter_than_three_letters():
+    d = NameDictionary.build(["Al", "Maria"], extra_tokens=["de"])
+
+    assert "al" not in d.first_names and "maria" in d.first_names and "de" not in d.name_tokens
+
+
+# --- NER (injected pipeline) --------------------------------------------------------------
 
 
 def _fake_pipe(targets):
@@ -148,6 +344,27 @@ def test_ner_low_confidence_entities_follow_the_threshold():
     assert HFEntityMasker(pipe=pipe, min_score=0.1).mask_many(["Maria"]) == ["[NAME]"]
 
 
+def test_ner_never_masks_protected_terms_or_one_and_two_letter_spans():
+    pipe = _fake_pipe([("COBOL", "PER"), ("R", "PER"), ("Nataly", "PER")])
+    ner = HFEntityMasker(pipe=pipe, protected={"cobol"})
+
+    [out] = ner.mask_many(["COBOL e R com Nataly"])
+
+    assert out == "COBOL e R com [NAME]"  # technologies stay, the person goes
+
+
+def test_ner_spans_are_split_at_protected_words():
+    def pipe(chunks, batch_size, stride):
+        # the model returns one span covering the job word and the name
+        return [[{"entity_group": "PER", "score": 0.9, "start": 0, "end": len(c)}] for c in chunks]
+
+    ner = HFEntityMasker(pipe=pipe, protected={"analista", "junior"})
+
+    out = ner.mask_many(["Analista Junior", "Analista Maria Souza Junior"])
+
+    assert out == ["Analista Junior", "Analista [NAME] Junior"]
+
+
 def test_ner_chunking_loses_no_text_and_maps_results_back_per_text():
     ner = HFEntityMasker(chunk_chars=20, pipe=_fake_pipe([("Ana", "PER")]))
     long_text = "linha um com Ana\n" * 6 + "x" * 50  # several chunks plus an over-long line
@@ -158,6 +375,20 @@ def test_ner_chunking_loses_no_text_and_maps_results_back_per_text():
     assert out[0].replace("[NAME]", "Ana") == long_text
     assert out[1] == ""
     assert out[2] == "[NAME]"
+
+
+def test_ner_never_cuts_a_name_in_half_at_a_chunk_boundary():
+    # Regression: a hard cut at 800 characters split "Maria" into "Ma" + "ria", so neither
+    # chunk contained the name and it survived.
+    ner = HFEntityMasker(chunk_chars=800, pipe=_fake_pipe([("Maria", "PER")]))
+    text = "x " * 399 + "Maria"  # one long line, the name lands right at the boundary
+
+    chunks = ner._chunks(text)
+    [out] = ner.mask_many([text])
+
+    assert "".join(chunks) == text
+    assert all("Mar" not in c or "Maria" in c for c in chunks)
+    assert "Maria" not in out
 
 
 def test_ner_failure_is_not_swallowed():
@@ -173,7 +404,23 @@ def test_mask_texts_applies_all_layers_in_order():
 
     [out] = mask_texts(["Maria Souza, maria@x.com, Recife"], ["Maria Souza"], ner)
 
-    assert out == "[NAME] [NAME], [EMAIL], [LOC]"
+    assert out == "[NAME], [EMAIL], [LOC]"
+
+
+def test_mask_texts_uses_the_dictionary_layer_and_runs_ner_once_per_unique_text():
+    calls = []
+
+    class Counting:
+        counts: Counter = Counter()
+
+        def mask_many(self, texts):
+            calls.append(list(texts))
+            return list(texts)
+
+    out = mask_texts(["ana silva", "ana silva", "python"], None, Counting(), None, D)
+
+    assert out == ["[NAME]", "[NAME]", "python"]
+    assert calls == [["[NAME]", "python"]]  # duplicates were collapsed before the model
 
 
 @pytest.mark.slow
@@ -183,53 +430,42 @@ def test_real_ner_model_masks_a_portuguese_name():
     assert "Maria" not in out
 
 
-@pytest.mark.parametrize(
-    ("raw", "kept", "gone"),
-    [
-        ("Estado civil: Casado\nPython", "Estado civil:", "Casado"),
-        ("Data de nascimento: 12 de março de 1990", "Data de nascimento:", "março"),
-        ("Bairro: Vila Mariana, São Paulo", "Bairro:", "Vila"),
-        ("Idade: 32 anos, Solteiro, 5 anos de experiência", "5 anos de experiência", "32"),
-        ("Nome:\nFulano de Tal\nExperiência", "Experiência", "Fulano"),
-        ("NOME - Fulano de Tal", "NOME", "Fulano"),
-        ("Nacionalidade: Brasileira | Cidade: Recife", "Nacionalidade:", "Recife"),
-    ],
-)
-def test_labeled_personal_data_values_are_redacted(raw, kept, gone):
-    masked = mask_patterns(raw)
-
-    assert kept in masked and gone not in masked
-    assert "[REDACTED]" in masked
+# --- identifiers and generalization -------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Experiência em Intel: drivers",  # 'tel' inside a word is not a label
-        "País: Brasil",  # 'pai' inside a word is not a label
-        "Qualidade: alta, 10 anos de experiência",  # 'idade' inside a word
-        "Python: avançado\nSQL: intermediário",
-    ],
-)
-def test_labels_inside_other_words_do_not_trigger(text):
-    assert mask_patterns(text) == text
+def test_surrogate_id_is_stable_salted_and_namespaced():
+    salt = b"s" * 32
+
+    assert surrogate_id("cand", "42", salt) == surrogate_id("cand", "42", salt)
+    assert surrogate_id("cand", "42", salt) != surrogate_id("cand", "42", b"t" * 32)
+    assert surrogate_id("cand", "42", salt) != surrogate_id("vac", "42", salt)
+    assert surrogate_id("cand", "42", salt) != "42"
+    assert surrogate_id("cand", "", salt) == ""
+    assert surrogate_id("cand", None, salt) == ""
 
 
-def test_written_out_dates_and_ages_are_masked():
-    assert mask_patterns("nascido em 5 de março de 1990") == "nascido em [DATE]"
-    assert mask_patterns("tenho 32 anos de idade") == "tenho [AGE]"
+def test_the_value_zero_is_a_real_id_not_a_missing_one():
+    assert surrogate_id("cand", "0", b"s" * 32) != ""
 
 
-def test_redaction_is_idempotent_and_counted_once():
-    stats: Counter = Counter()
-
-    once = mask_patterns("Estado civil: Casado", stats)
-    twice = mask_patterns(once, stats)
-
-    assert once == twice == "Estado civil: [REDACTED]"
-    assert stats["LABELED"] == 1
+def test_dates_are_generalized_to_the_month():
+    assert to_month("05-03-2021") == "2021-03"
+    assert to_month("1990-04-02") == "1990-04"
+    assert to_month("") is None
+    assert to_month("not a date") is None
 
 
-def test_residual_check_reports_unredacted_labeled_values():
-    assert residual_pattern_counts(["Estado civil: Casado"])["LABELED"] == 1
-    assert residual_pattern_counts(["Estado civil: [REDACTED]"])["LABELED"] == 0
+def test_age_band_uses_the_attained_age_on_the_snapshot_date():
+    snapshot = date(2026, 10, 4)
+
+    assert age_band("2001-01-01", snapshot) == "25-34"  # already turned 25
+    assert age_band("2001-12-31", snapshot) == "<25"  # turns 25 later in the year
+    assert age_band("1990-04-02", snapshot) == "35-44"
+    assert age_band("1960-01-01", snapshot) == "55+"
+    assert age_band("2015-01-01", snapshot) is None  # implausible -> missing, not kept
+    assert age_band("", snapshot) is None
+
+
+def test_age_band_moves_with_the_snapshot_not_a_hardcoded_year():
+    assert age_band("2001-01-01", date(2025, 6, 1)) == "<25"
+    assert age_band("2001-01-01", date(2026, 6, 1)) == "25-34"
