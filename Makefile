@@ -1,4 +1,4 @@
-.PHONY: sync ingest repair train baselines figures test lint format serve drift-check monitor
+.PHONY: sync ingest repair data-summary train baselines figures test lint format serve drift-check monitor
 
 # Install/sync dependencies (runtime + dev) via uv
 sync:
@@ -11,6 +11,10 @@ ingest:
 # Re-apply the masking layers to the existing masked tables (minutes, no full re-ingest)
 repair:
 	uv run python -m src.ingest --repair
+
+# Aggregates of the masked real data per label setting and the temporal split
+data-summary:
+	uv run python -m src.masked_data
 
 # Train the model; build the job catalog, fairness report and drift reference
 train:
