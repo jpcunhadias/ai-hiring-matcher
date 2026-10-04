@@ -10,6 +10,8 @@ build/
 
 # uv / virtual environments
 .env
+# the global gitignore blocks .env.*, but the example file is meant to be shared
+!.env.example
 .venv
 env/
 venv/
