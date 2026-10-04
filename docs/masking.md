@@ -56,7 +56,9 @@ Layers run in this order on every free-text field:
    the source system's own name fields. In the first 400 characters of a text (where a
    person's own name sits), up to two *unknown* words after a first name also continue the
    chain, as unknown surnames: a word is unknown when it is not an ordinary word of the
-   vacancy vocabulary. Deeper in a text this is off, because there an unknown word after a
+   vacancy vocabulary. An unknown *first* name is caught when two known surnames follow it, and
+   in the first 150 characters one line break between name words is tolerated (PDF text
+   often has one word per line). Deeper in a text this is off, because there an unknown word after a
    first name is more often a school or employer. `santo`/`santa`/`são` never start a chain
    (`Santo André` is a place). Commas and line breaks end a chain.
 5. **Named-entity recognition** (multilingual BERT), only on short fields that keep their
@@ -82,7 +84,9 @@ review sample). Treat the recall as unknown, somewhere below 90%, for names outs
 
 ## `--repair`
 
-Masking layers are idempotent: masked text passes through them unchanged. `--repair` loads the
+Masking layers are idempotent in practice: masked text passes through them unchanged, apart from
+rare ordering effects (a later layer can expose a match for an earlier one), so after changing a
+layer run `--repair` until the replacements this pass drop to nearly zero. `--repair` loads the
 existing masked tables, re-applies the current layers, re-reads the raw archive only for the
 structured names, the dictionary and the birth dates, and publishes a new generation. Use it
 when a layer is added or fixed; it takes a few minutes instead of a full re-ingest.
