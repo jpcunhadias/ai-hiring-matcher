@@ -35,7 +35,7 @@ confidence intervals are wide; say so when reporting.
   proxy); they are used for the label and the split, never as features.
 * The ids are salted hashes; they identify, they do not describe.
 
-## Planned features
+## Features (`src/features.py`)
 
 1. **Text match** (per pair): TF-IDF cosine on words and on character n-grams, BM25, and
    multilingual-e5 cosine (CV chunked, best chunk against the vacancy); overlap between the
@@ -46,8 +46,31 @@ confidence intervals are wide; say so when reporting.
    "was filled in" indicator goes with each.
 3. **Within-vacancy context**: each score as a z-score and rank among that vacancy's
    candidates, the number of candidates, CV length (a confound check: length alone showed no signal).
-4. **History, computed only from the past**: an applicant's earlier candidacies and hires, the
-   months between the vacancy request and the application, a client's earlier hire rate.
+4. **History, computed only from the past**: an applicant's earlier candidacies and hires and a
+   client's earlier hire rate. A row at month t only sees candidacies started before t, and an
+   outcome only once it had been recorded before t.
+
+`FeatureBuilder` is fit on the training period only (TF-IDF vocabularies, the list of generic
+vacancy words, the global hire rate) and then transforms any frame. Optional multilingual-e5
+cosine via an injected encoder (`make feature-report ARGS=--embed`).
+
+### A signal that is not a signal: `lag_months`
+
+The months between the vacancy request and the candidacy was the strongest single feature on
+the test period (+10.8 points of hit@1 over random, resolved-only). It is funnel dynamics, not
+candidate quality: recruiters keep adding candidates until someone is hired, so the hire tends
+to be the latest one added (68% of the time in resolved vacancies against a 40% base rate). It
+would not exist when ranking a fresh pool. It stays in the feature frame as a diagnostic and is
+excluded by `model_features()` unless asked for as an ablation.
+
+### Single-feature results
+
+`make feature-report` evaluates each feature alone as a ranking rule on the later vacancies.
+The test sets are small (92 and 177 vacancies), so most intervals include zero; read the
+ranking of features, not the point estimates. Text similarity alone (TF-IDF) is about +3 and
++0 points here, below the +4 measured over all vacancies earlier, which suggests the
+zero-shot signal is weak and drifts over time. The next step is a supervised ranker evaluated
+over several rolling time folds to get more test vacancies.
 
 Models, in order: the TF-IDF zero-shot baseline (about +4 points of hit@1 over random), a
 logistic pairwise ranker, then gradient-boosted ranking if the features earn it.

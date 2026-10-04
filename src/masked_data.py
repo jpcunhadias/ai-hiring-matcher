@@ -94,8 +94,8 @@ def build_pairs(
     vac = tables.vacancies.copy()
     vac["query"] = (vac["title"] + " " + vac["activities"] + " " + vac["competencies"]).str.strip()
     vac = vac[vac["query"].str.len() >= min_query_chars]
-    vac = vac[["vacancy_id", "query", "requested_month", *VACANCY_FEATURES]].rename(
-        columns={c: f"v_{c}" for c in VACANCY_FEATURES}
+    vac = vac[["vacancy_id", "title", "query", "requested_month", *VACANCY_FEATURES]].rename(
+        columns={"title": "v_title", **{c: f"v_{c}" for c in VACANCY_FEATURES}}
     )
 
     app = tables.applicants
