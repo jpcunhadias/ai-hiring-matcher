@@ -3,11 +3,14 @@
 Fit on the training period only, then transform any frame from `src.masked_data`:
 
     builder = FeatureBuilder().fit(split.train)
-    X = builder.transform(split.test, history=all_pairs)
+    X = builder.transform(split.test, history=all_pairs, pool=split.test_pool)
 
 Four families (docs/real-data.md): text match, structured match, within-vacancy context, and
 history. History is computed strictly from the past: a row at month t only sees candidacies
-requested before t, and an outcome only once it had been recorded before t.
+started before t, and an outcome only once it had been recorded before t. The within-vacancy
+context (count, z-score, rank) is computed over the vacancy's whole pool, whatever the outcome of
+its members, so it cannot depend on who happened to be resolved; it describes the completed
+pool, which makes the evaluation a retrospective ranking of that pool.
 
 Never features: sex, disability, age band (separate table), status and updated_month (they are
 the outcome), the surrogate ids.
@@ -21,6 +24,7 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from src.masked_data import APPLICANT_FEATURES, VACANCY_FEATURES
 from src.masking import fold
 
 Encoder = Callable[[list[str]], np.ndarray]  # texts -> L2-normalized embeddings
@@ -37,9 +41,14 @@ _LANGUAGE = {
     "avancado": 3,
     "fluente": 4,
 }
-_LEVEL = [("fundamental", 1), ("medio", 2), ("tecnico", 2.5), ("superior", 3), ("pos", 4),
-          ("mestrado", 5), ("doutorado", 6)]  # fmt: skip
+# most specific first: "Pós Doutorado" is a doctorate, "Ensino Médio Técnico" is technical
+_LEVEL = [("doutorado", 6), ("mestrado", 5), ("pos", 4), ("superior", 3), ("tecnico", 2.5),
+          ("medio", 2), ("fundamental", 1)]  # fmt: skip
 _UNFINISHED = ("cursando", "incompleto")
+_TEXT_COLUMNS = [
+    "v_title", "query", "cv_text",
+    *(f"v_{c}" for c in VACANCY_FEATURES), *(f"a_{c}" for c in APPLICANT_FEATURES),
+]  # fmt: skip
 
 TEXT_SCORES = ["tfidf_word", "tfidf_char", "title_sim", "query_coverage", "skills_coverage"]
 CONTEXT_SCORES = [*TEXT_SCORES, "cv_len_log"]
@@ -66,24 +75,38 @@ def month_index(month: str | None) -> float:
     return int(month[:4]) * 12 + int(month[5:]) - 1
 
 
-def education_rank(value: str | None) -> float:
-    if not value:
+def _clean(value: object) -> str:
+    """A missing value (None, NaN, pd.NA) is the empty string; anything else is its text."""
+    return "" if value is None or pd.isna(value) else str(value)
+
+
+def _normalized(frame: pd.DataFrame) -> pd.DataFrame:
+    """A copy whose text and category columns never hold a missing value."""
+    out = frame.copy()
+    for column in _TEXT_COLUMNS:
+        if column in out:
+            out[column] = out[column].astype(object).where(out[column].notna(), "")
+    return out
+
+
+def education_rank(value: object) -> float:
+    text = fold(_clean(value))
+    if not text:
         return float("nan")
-    text = fold(value)
     for key, rank in _LEVEL:
         if key in text:
             return rank - (0.5 if any(w in text for w in _UNFINISHED) else 0.0)
     return float("nan")
 
 
-def language_rank(value: str | None) -> float:
-    return float(_LANGUAGE.get(fold(value or ""), float("nan")))
+def language_rank(value: object) -> float:
+    return float(_LANGUAGE.get(fold(_clean(value)), float("nan")))
 
 
-def _area_parts(areas: str | None) -> list[str]:
+def _area_parts(areas: object) -> list[str]:
     """'TI - Projetos-TI - SAP-' -> ['ti - projetos', 'ti - sap']: entries are separated by a
     hyphen without surrounding spaces, and a name may itself contain ' - '."""
-    return [p.strip() for p in re.split(r"(?<!\s)-(?!\s)", fold(areas or "")) if p.strip()]
+    return [p.strip() for p in re.split(r"(?<!\s)-(?!\s)", fold(_clean(areas))) if p.strip()]
 
 
 def _cosine(left, right, rows_left: np.ndarray, rows_right: np.ndarray) -> np.ndarray:
@@ -259,17 +282,46 @@ class FeatureBuilder:
 
     # --------------------------------------------------------------------- transform
 
-    def transform(self, frame: pd.DataFrame, history: pd.DataFrame | None = None) -> pd.DataFrame:
-        """Feature frame aligned with `frame`'s index. `history` is every pair known to the
-        loader (not only the evaluated setting); only its strict past is used per row."""
+    def _compute(self, frame: pd.DataFrame, history: pd.DataFrame | None) -> pd.DataFrame:
         text = self._text_features(frame)
         feats = pd.concat(
-            [text, self._structured_features(frame), self._history_features(frame, history)], axis=1
+            [text, self._structured_features(frame), self._history_features(frame, history)],
+            axis=1,
         )
         feats["n_candidates"] = frame.groupby("vacancy_id")["candidate_id"].transform("size")
         scores = [*CONTEXT_SCORES, *(["e5_cosine"] if "e5_cosine" in feats else [])]
         for name in scores:
             feats[f"{name}_z"], feats[f"{name}_rank"] = _within(frame, feats[name])
+        return feats
+
+    def transform(
+        self,
+        frame: pd.DataFrame,
+        history: pd.DataFrame | None = None,
+        pool: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        """Feature frame aligned with `frame`'s index.
+
+        `history` is every pair known to the loader (not only the evaluated setting); only its
+        strict past is used per row. `pool` is every candidacy of the vacancies in `frame`,
+        whatever its outcome: the within-vacancy context is computed over it, so filtering
+        `frame` by outcome (resolved-only) cannot change the context. Defaults to `frame`.
+        """
+        frame = _normalized(frame)
+        if pool is None:
+            return self._compute(frame, history)
+        keys = ["vacancy_id", "candidate_id"]
+        members = _normalized(pool[pool["vacancy_id"].isin(frame["vacancy_id"])]).reset_index(
+            drop=True
+        )
+        index = pd.MultiIndex.from_frame(members[keys])
+        if not index.is_unique:
+            raise ValueError("the pool has duplicate (vacancy, candidate) pairs")
+        positions = index.get_indexer(pd.MultiIndex.from_frame(frame[keys]))
+        if (positions < 0).any():
+            raise ValueError("every evaluated row must be part of the pool")
+        feats = self._compute(members, history).iloc[positions]
+        feats.index = frame.index
         return feats
 
 

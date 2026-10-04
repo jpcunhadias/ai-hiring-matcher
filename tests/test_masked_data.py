@@ -6,6 +6,7 @@ from src.masked_data import (
     MaskedTables,
     audit_attributes,
     build_pairs,
+    labels_as_of,
     load_masked,
     select_setting,
     summarize,
@@ -130,10 +131,12 @@ def test_unknown_setting_is_rejected():
         select_setting(build_pairs(make_tables(2)), "everything")  # type: ignore[arg-type]
 
 
-def test_temporal_split_trains_on_the_past_and_tests_on_the_future():
-    frame = select_setting(build_pairs(make_tables(10)), "all_prospects")
+def split_of(tables, setting="all_prospects", fraction=0.2):
+    return temporal_split(build_pairs(tables), setting, fraction)
 
-    split = temporal_split(frame, test_fraction=0.2)
+
+def test_temporal_split_trains_on_the_past_and_tests_on_the_future():
+    split = split_of(make_tables(10))
 
     assert split.cutoff == "2020-08"
     assert (
@@ -141,29 +144,86 @@ def test_temporal_split_trains_on_the_past_and_tests_on_the_future():
     )
     assert set(split.train["vacancy_id"]).isdisjoint(split.test["vacancy_id"])
     assert split.test["vacancy_id"].nunique() == 2
+    assert set(split.test_pool["vacancy_id"]) == set(split.test["vacancy_id"])
+    assert split.train_pool["candidacy_month"].max() <= split.cutoff
 
 
-def test_training_rows_whose_outcome_is_recorded_after_the_cutoff_are_dropped():
+def test_labels_as_of_the_cutoff_hide_what_was_not_yet_known():
+    frame = build_pairs(make_tables(3))
+    frame.loc[frame["candidate_id"] == "c0hired", "updated_month"] = "2020-12"  # recorded late
+    frame.loc[frame["candidate_id"] == "c0rej", "updated_month"] = pd.NA  # no date at all
+    frame.loc[frame["candidate_id"] == "c1pend", "candidacy_month"] = "2020-11"  # started later
+
+    out = labels_as_of(frame, "2020-02").set_index("candidate_id")
+
+    assert out.loc["c0hired", ["outcome", "y", "resolved"]].tolist() == ["pending", 0, False]
+    assert out.loc["c0rej", ["outcome", "y", "resolved"]].tolist() == ["pending", 0, False]
+    assert out.loc["c1hired", ["outcome", "y", "resolved"]].tolist() == ["hired", 1, True]
+    assert "c1pend" not in out.index  # it did not exist yet
+    assert "c2hired" not in out.index  # started after the cutoff month
+
+
+def test_a_hire_recorded_after_the_cutoff_cannot_decide_what_the_training_set_contains():
     tables = make_tables(10)
     late = tables.candidacies["candidate_id"] == "c0hired"
-    tables.candidacies.loc[late, "updated_month"] = "2020-12"  # decided long after the cutoff
-    frame = select_setting(build_pairs(tables), "all_prospects")
+    tables.candidacies.loc[late, "updated_month"] = "2020-12"
+    on_time = split_of(make_tables(10))
+    delayed = split_of(tables)
 
-    split = temporal_split(frame, test_fraction=0.2)
+    # as of the cutoff vacancy v0 has no known hire, so it is not a training vacancy at all
+    assert "v0" in set(on_time.train["vacancy_id"])
+    assert "v0" not in set(delayed.train["vacancy_id"])
+    # and changing that future hire to anything else changes nothing in the training set
+    pending = make_tables(10)
+    row = pending.candidacies["candidate_id"] == "c0hired"
+    pending.candidacies.loc[row, ["outcome", "status", "updated_month"]] = [
+        "pending",
+        "pending",
+        "2020-12",
+    ]
+    pd.testing.assert_frame_equal(split_of(pending).train, delayed.train)
 
-    assert "c0hired" not in set(split.train["candidate_id"])
-    assert "c0rej" in set(split.train["candidate_id"])  # the rest of that vacancy stays
+
+def test_an_outcome_without_a_date_counts_as_pending_in_training():
+    tables = make_tables(10)
+    rows = tables.candidacies["candidate_id"].isin(["c1rej", "c1hired"])
+    tables.candidacies.loc[rows, "updated_month"] = ""
+
+    for setting in ("resolved_only", "all_prospects"):
+        train = split_of(tables, setting).train
+        # nothing about v1's outcomes was known at the cutoff: no hire, so it is not rankable
+        assert "v1" not in set(train["vacancy_id"]), setting
+        assert "v2" in set(train["vacancy_id"]), setting
+
+
+def test_the_test_period_keeps_its_final_labels():
+    tables = make_tables(10)
+    late = tables.candidacies["candidate_id"] == "c9hired"
+    tables.candidacies.loc[late, "updated_month"] = "2021-06"  # decided long after the cutoff
+
+    split = split_of(tables)
+
+    assert split.test.loc[split.test["candidate_id"] == "c9hired", "y"].tolist() == [1]
+
+
+def test_the_cutoff_does_not_depend_on_any_outcome():
+    tables = make_tables(10)
+    swapped = make_tables(10)
+    outcome = swapped.candidacies["outcome"]
+    swapped.candidacies["outcome"] = outcome.replace({"hired": "rejected", "rejected": "hired"})
+
+    assert split_of(tables).cutoff == split_of(swapped).cutoff
 
 
 def test_temporal_split_rejects_unusable_input():
-    frame = select_setting(build_pairs(make_tables(10)), "all_prospects")
+    pairs = build_pairs(make_tables(10))
 
     with pytest.raises(ValueError, match="test_fraction"):
-        temporal_split(frame, test_fraction=1.5)
+        temporal_split(pairs, "all_prospects", 1.5)
     with pytest.raises(ValueError, match="requested_month"):
-        temporal_split(frame.assign(requested_month=None))
+        temporal_split(pairs.assign(requested_month=None), "all_prospects")
     with pytest.raises(ValueError, match="two distinct months"):
-        temporal_split(frame.assign(requested_month="2020-01"))
+        temporal_split(pairs.assign(requested_month="2020-01"), "all_prospects")
 
 
 def test_summary_is_aggregates_only():
@@ -183,3 +243,17 @@ def test_audit_attributes_are_available_separately():
     audit = audit_attributes(make_tables(2))
 
     assert {"sex", "pcd", "age_band"} <= set(audit.columns)
+
+
+def test_an_explicit_cutoff_overrides_the_fraction():
+    pairs = build_pairs(make_tables(10))
+
+    split = temporal_split(pairs, "all_prospects", cutoff="2020-05")
+
+    assert split.cutoff == "2020-05"
+    assert split.train["requested_month"].max() == "2020-05"
+    assert split.test["requested_month"].min() == "2020-06"
+    with pytest.raises(ValueError, match="YYYY-MM"):
+        temporal_split(pairs, "all_prospects", cutoff="May 2020")
+    with pytest.raises(ValueError, match="empty"):
+        temporal_split(pairs, "all_prospects", cutoff="2030-01")

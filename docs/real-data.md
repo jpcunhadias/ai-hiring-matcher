@@ -22,10 +22,25 @@ only, at least one candidate who was passed over). Ranking is judged *within* a 
 
 ## Split
 
-Train on earlier vacancies, test on later ones (cutoff on the requested month, 80/20 by
-vacancies). A training row is dropped when its outcome was recorded after the cutoff: in
-production that label would not exist yet. Test sets are small (about 90 and 180 vacancies), so
-confidence intervals are wide; say so when reporting.
+Train on earlier vacancies, test on later ones. The cutoff is the requested month below which
+80% of the vacancies with at least two candidates fall (no outcome influences it), or an
+explicit `--cutoff YYYY-MM`. The split comes first; the training labels are then rebuilt *as of
+the cutoff*:
+
+* a candidacy that started after the cutoff did not exist yet and is dropped;
+* an outcome recorded after the cutoff, or with no recorded date, counts as still pending;
+* only then are the rankable vacancies chosen, so no future outcome decides what the training
+  set contains.
+
+The test period keeps its final labels, because that is what is being predicted. Recent
+vacancies have more pending outcomes and therefore fewer rankable ones, so the test sets are
+small (57 resolved-only and 125 all-prospects vacancies at the 2023-01 cutoff): confidence
+intervals are wide, and results should be read as "no clear signal" rather than as estimates.
+
+The within-vacancy context (candidate count, z-score and rank of each score) is computed over
+the vacancy's whole pool, whatever the outcome of its members, so it cannot depend on who was
+resolved. It describes the completed pool: the evaluation is a retrospective ranking of that
+pool, not a replay of the moment each candidate applied.
 
 ## What can and cannot be a feature
 
@@ -65,12 +80,18 @@ excluded by `model_features()` unless asked for as an ablation.
 
 ### Single-feature results
 
-`make feature-report` evaluates each feature alone as a ranking rule on the later vacancies.
-The test sets are small (92 and 177 vacancies), so most intervals include zero; read the
-ranking of features, not the point estimates. Text similarity alone (TF-IDF) is about +3 and
-+0 points here, below the +4 measured over all vacancies earlier, which suggests the
-zero-shot signal is weak and drifts over time. The next step is a supervised ranker evaluated
-over several rolling time folds to get more test vacancies.
+`make feature-report` evaluates each feature alone as a ranking rule on the later vacancies
+(hit@1 gain over a random order, 95% bootstrap interval over vacancies, exact tie handling).
 
-Models, in order: the TF-IDF zero-shot baseline (about +4 points of hit@1 over random), a
-logistic pairwise ranker, then gradient-boosted ranking if the features earn it.
+At the 2023-01 cutoff **no candidate-quality feature separates from random**: every interval
+includes zero except `lag_months` (+10.9 points resolved-only), the process artifact above, and
+a seniority-word-in-CV cue that points the wrong way (-7.9). TF-IDF is +1.8 and -2.7 points. An
+earlier version of this pipeline showed a few apparent signals (for example an education gap at
++6 points); they did not survive fixing two leaks, in which the choice of training vacancies and
+the within-vacancy context depended on outcomes recorded after the cutoff. Both fixes and the
+tests that guard them are described in the commit history.
+
+Consequences for the project: the zero-shot text similarity measured over all vacancies (about
++4 points) is weak and does not clearly persist on later vacancies; and with this few test
+vacancies, only a large effect could be detected. The next step is a supervised ranker
+evaluated over several rolling cutoffs, which yields more test vacancies.
