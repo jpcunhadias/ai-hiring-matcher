@@ -23,7 +23,7 @@ fields, hosted on AWS S3 because the course was an AWS partner. This is the rebu
   by two outside reviews of the masked sample; each round found leaks the previous checks had
   missed, and each fix has a test ([docs/masking.md](docs/masking.md)).
 - **Leakage found and removed.** Reviews caught two ways the future leaked into training; the
-  corrected evaluation changed the headline numbers ([below](#from-masked-tables-to-a-ranking-problem)).
+  corrected evaluation changed the headline numbers ([docs/real-data.md](docs/real-data.md)).
 - **The strongest signal was an artifact.** The gap between a vacancy's request and a
   candidacy beats every model, but it measures how recruiters work, not candidate quality.
 - **An honest result.** The best clean model gains about 6 points of top-1 accuracy over random
@@ -47,12 +47,6 @@ contain no data.
 ## Contents
 
 - [Part 1: real recruiting data (private)](#part-1-real-recruiting-data-private)
-  - [The data and the constraint](#the-data-and-the-constraint)
-  - [Privacy pipeline](#privacy-pipeline)
-  - [From masked tables to a ranking problem](#from-masked-tables-to-a-ranking-problem)
-  - [Features](#features)
-  - [Results](#results)
-  - [What I would do next](#what-i-would-do-next)
 - [Part 2: synthetic dataset (public)](#part-2-synthetic-dataset-public)
   - [The dataset](#the-dataset)
   - [Key finding: the label is gender-biased](#key-finding-the-label-is-gender-biased)
@@ -70,128 +64,38 @@ contain no data.
 
 # Part 1: real recruiting data (private)
 
-## The data and the constraint
+Three exports from an applicant tracking system (vacancies, candidates and the candidacies that
+link them), Portuguese-language, 2018-12 to 2025-03. 77.7% of candidacy outcomes are still
+pending, structured applicant fields are 81-100% empty, and the real names, phones and addresses
+are still inside the CV text. The data cannot be published, so the architecture is a private
+store plus public code, aggregate results and write-ups.
 
-Three exports from an applicant tracking system (vacancies, candidates, and the candidacies that
-link them), Portuguese-language, dated 2018-12 to 2025-03. The numbers that shape everything else:
+- **Privacy pipeline.** Allowlisted columns, salted hashed ids, layered scrubbing of free text
+  (patterns, names, a first-name dictionary, NER where text keeps its capitalization), atomic
+  private output, and two kept-apart residual estimates. The result is pseudonymized, not
+  anonymous. Details and measured limits: [docs/masking.md](docs/masking.md).
+- **Ranking problem.** Label `hired`, in a resolved-only and an all-prospects setting; rolling
+  time folds whose training labels are rebuilt as of each cutoff; four feature families fit on
+  the past only. Two outcome leaks were found in review and fixed, which removed the apparent
+  signals of an earlier draft. Details: [docs/real-data.md](docs/real-data.md).
+- **A signal that is not a signal.** The months between a vacancy's request and a candidacy beat
+  every model (+10 points of top-1 hit rate on resolved-only), but recruiters keep adding
+  candidates until someone is hired, so it measures how they work, not candidate quality. It is
+  excluded from the clean models.
 
-- **77.7% of candidacy outcomes are still pending** (16.8% rejected or withdrawn, 5.6% hired). A
-  pending candidacy is not a negative, so labels are censored.
-- **Structured applicant fields are 81–100% empty** (education, English, area, seniority); the
-  CV text, present for 68% of applicants, carries almost all the signal. All CVs are lowercase.
-- Only about 980 vacancies can be ranked at all (at least two candidates and one hire), and 490
-  when only resolved outcomes are counted.
-- The provider randomized the structured names, phones and emails, but the real names, phones
-  and addresses are still inside the CV text.
-
-The data cannot be published, so the architecture is a private store plus public code, aggregate
-results and write-ups instead of "anyone can clone and run".
-
-## Privacy pipeline
-
-[`src/ingest.py`](src/ingest.py) is the only code that reads the raw archives; it writes masked
-tables that everything else uses ([docs/masking.md](docs/masking.md) has the full policy).
-
-- **Allowlist, not blocklist.** A column that is not named is dropped, so forgetting one cannot
-  leak it. Ids are salted hashes; sex, disability and age band live in a separate table that is
-  never joined into features; dates are generalized to the month.
-- **Layered free-text scrubbing:** labeled personal-data lines, patterns (emails, phones,
-  CPF/RG, dates, ages, marital status, street addresses, neighborhoods), the applicant's own
-  name, a dictionary of Brazilian first names (IBGE census) with an unknown-surname rule, and a
-  multilingual NER model only where text keeps its capitalization.
-- **Why not just NER?** On lowercase CVs a cased NER model recovered only 14% of injected names,
-  and it is the slow part of the run (45 minutes). The dictionary approach is cheap enough to
-  re-apply in minutes (`make repair`). Its measured 90% recall came from synthetic names and
-  overstated real surnames, which an outside review of the masked sample exposed.
-- **Fail-closed, atomic, private.** Output is staged and swapped in only on success, with `0700`
-  and `0600` permissions and a validated salt.
-- **Measured, not asserted.** Two residual figures are reported and kept apart: how well the
-  masker agrees with itself, and an independent, looser estimate of what slipped through. After
-  masking, a within-vacancy ranking rule still gained about 4 points of top-1 accuracy over
-  random, so privacy cost no measurable signal.
-
-The result is **pseudonymized, not anonymous**: employers, schools and dates stay in the text on
-purpose, because they are the signal. It is for controlled access only.
-
-## From masked tables to a ranking problem
-
-[`src/masked_data.py`](src/masked_data.py) turns candidacies into labeled (vacancy, candidate)
-pairs ([docs/real-data.md](docs/real-data.md)).
-
-- **Label.** `hired = 1`, reported under two settings: *resolved-only* (honest labels, small) and
-  *all-prospects* (pending counted as not hired: larger, noisier).
-- **Rolling temporal evaluation.** Train on every vacancy up to a cutoff, test on the next six
-  months, move forward. The labels are rebuilt *as of the cutoff*: a candidacy that had not
-  started, or an outcome recorded later (or with no date), counts as pending, and only then are
-  the rankable vacancies chosen.
-- **Two leaks, found in review.** First, selecting rankable vacancies before the split let a hire
-  recorded after the cutoff decide what the training set contained. Second, within-vacancy
-  context was computed over a pool that depended on who had been resolved. Fixing both removed
-  the apparent signals of an earlier version (for example an education gap at +6 points), which
-  is why the numbers below are smaller than the first draft's.
-- **Exact, tie-aware metrics.** hit@k and reciprocal rank with the expectation over tie orders
-  computed in closed form and checked against brute force, plus paired bootstrap intervals over
-  vacancies.
-
-## Features
-
-[`src/features.py`](src/features.py), fit on the training period only, in four families:
-
-1. **Text match:** TF-IDF on words and characters, title similarity, coverage of a vacancy's
-   distinctive words in the CV and skills, optional multilingual-e5 cosine.
-2. **Structured match:** education and language gaps, area and SAP match, a seniority cue, and
-   "was this field filled in" flags (missingness is itself informative).
-3. **Within-vacancy context:** each score as a z-score and rank among the vacancy's candidates.
-4. **History, from the past only:** an applicant's earlier candidacies and hires, a client's
-   earlier hire rate. A row at month *t* sees only candidacies started before *t* and outcomes
-   recorded before *t*.
-
-Never features: sex, disability, age band, the funnel status and outcome dates (they *are* the
-outcome), and the ids.
-
-**A signal that is not a signal.** The months between a vacancy's request and a candidacy
-(`lag_months`) was the strongest feature: +10 points on resolved-only. But recruiters keep adding
-candidates until someone is hired, so the hire tends to be the latest one added (68% of the time
-in resolved vacancies against a 40% base rate). That is funnel dynamics, not candidate quality,
-and it would not exist when ranking a fresh pool. It is reported as a diagnostic and excluded from
-the clean models.
-
-## Results
-
-Rolling folds, 244 test vacancies (resolved-only) and 474 (all-prospects). Gain in top-1 hit rate
-over a random order, with a 95% bootstrap interval over vacancies:
+Gain in top-1 hit rate over a random order, rolling folds (244 and 474 test vacancies), with a
+95% bootstrap interval:
 
 | Method | resolved-only | all-prospects |
 |---|---|---|
 | TF-IDF zero-shot | +2.2 [-4.0, +7.8] | +3.6 [-0.2, +7.2] |
-| Logistic | -4.2 [-9.6, +1.2] | +2.0 [-1.5, +5.4] |
-| Boosted trees | -3.8 [-9.5, +1.7] | +2.2 [-1.4, +5.9] |
-| Logistic, within-vacancy centered | -0.6 [-6.2, +4.9] | +4.1 [+0.4, +8.0] |
-| Boosted trees, within-vacancy centered | +1.9 [-3.7, +7.8] | **+6.4 [+2.7, +10.1]** |
+| Boosted trees, within-vacancy centered (best clean model) | +1.9 [-3.7, +7.8] | +6.4 [+2.7, +10.1] |
 | `lag_months` alone (process artifact) | +10.4 [+7.3, +13.9] | +4.5 [+2.6, +6.4] |
 
-How to read it:
-
-- Plain pointwise models do no better than TF-IDF; their largest weight is the number of
-  candidates in the vacancy, which cannot help rank candidates *inside* it. Centering every
-  feature on its vacancy mean (a change made after seeing these results, one of about nine
-  variants) removes that.
-- The best clean model is boosted trees, centered, on all-prospects (+6.4). Its paired difference
-  to plain TF-IDF is +2.8 [-1.5, +7.3], so it cannot be told apart from the zero-shot rule. On
-  resolved-only, the cleaner label, nothing beats random.
-- All-prospects counts pending candidates as not hired, which adds label noise.
-
-**Summary:** the data supports a small text-matching signal (about +4 points) that a plain TF-IDF
-rule already captures. The engineered features and supervised models add, at best, a few points
-that the available test vacancies cannot confirm.
-
-## What I would do next
-
-- A pairwise or lambda-rank objective, and the embedding feature (`make rank ARGS=--embed`).
-- More outcomes: much of the censoring is recent; the same pipeline would be re-run as outcomes
-  resolve.
-- Treat this as a decision-support signal at most, never an automatic screen (see
-  [Responsible use](#responsible-use)).
+The data supports a small text-matching signal (about +4 points) that a plain TF-IDF rule already
+captures; the best model is statistically indistinguishable from it, and on resolved-only nothing
+beats random. The full table and how to read it are in
+[docs/real-data.md](docs/real-data.md#rolling-fold-ranker-srcrankerpy).
 
 ```bash
 make ingest          # mask the raw archives (needs private access)
