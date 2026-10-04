@@ -148,6 +148,11 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         ),
     ),
 ]
+# an age followed by a bullet or a nationality / placeholder reads as a biographical list item
+_AGE_LISTED = re.compile(
+    r"[•·▪●◦■□\uf0a0\uf0b7\uf0d8]|brasileir[oa]\b|\[(?:redacted|date|loc|name|phone|email)\]",
+    re.IGNORECASE,
+)
 _BARE_AGE = re.compile(r"(?<![\w\[])(?:1[89]|[2-5]\d|6[0-5]) anos(?!\w\w)")  # tolerates "anosr."
 _REPLACEMENT = {"ATTRIBUTE": _REDACTED}
 
@@ -190,11 +195,16 @@ def _mask_bare_ages(text: str, stats: Counter | None = None) -> str:
     def repl(match: re.Match[str]) -> str:
         before = text[max(0, match.start() - 14) : match.start()].rstrip(" \t")
         after = text[match.end() : match.end() + 14].lstrip(" \t")
+        quantified = re.search(
+            r"\b(?:de|há|ha|com|por|cerca|quase|durante|total|mais|menos)$", before
+        )
+        tail = text[match.end() : match.end() + 30].lstrip(" \t")
+        listed = not quantified and _AGE_LISTED.match(tail)
         keyword = re.search(r"\b(?:tenho|idade)$", before)
         personal = re.search(r"(?:\[[a-z_]+\]|brasileir[oa]),$", before, re.I)
         left = not before or before[-1] in ",;(-–|/]:\n"
         right = not after or after[0] in ",.;)|/\n-–[("
-        if not (keyword or personal or (left and right)):
+        if not (keyword or personal or listed or (left and right)):
             return match.group()
         if stats is not None:
             stats["AGE"] += 1
