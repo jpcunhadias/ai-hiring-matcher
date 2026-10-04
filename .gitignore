@@ -39,6 +39,8 @@ models/
 data/processed/
 data/logs/
 data/masked/
+# Public IBGE census first names (no license stated): fetched locally, not redistributed.
+data/reference/
 
 # Real challenge data (applicants, vacancies, prospects): personal data, never commit.
 datathon data/
