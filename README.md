@@ -38,8 +38,9 @@ the data it's trained on.
 
 ## Features
 
-- **Semantic retrieval matcher** — resumes ranked against a 51-job catalog
-  by `sentence-transformers` embedding similarity, not keyword matching.
+- **Embedding retrieval matcher** — resumes ranked against a 51-job catalog by
+  `sentence-transformers` similarity, benchmarked against random, skill-overlap
+  and TF-IDF baselines.
 - **Fairness audit** — checks the training label itself for demographic
   skew before trusting it, independent of any model.
 - **Drift monitoring** — compares real logged requests against a training
@@ -124,17 +125,23 @@ with `sentence-transformers` (`all-MiniLM-L6-v2`, local, no API key).
 similarity — this is the actual matching logic.
 
 Evaluated as retrieval (does a resume recover its own `Job Roles` among the
-51 known jobs?):
+51 known jobs?), against simple baselines scored the same way
+([src/baselines.py](src/baselines.py), `make baselines`):
 
-| Metric | Value |
-|---|---:|
-| Recall@1 | 63.1% |
-| Recall@5 | 88.2% |
-| MRR | 0.745 |
+| Method | Recall@1 | Recall@5 | MRR |
+|---|---:|---:|---:|
+| Random (no information) | 2.0% | 9.8% | 0.089 |
+| Skill overlap only | 36.0% | 63.3% | 0.488 |
+| TF-IDF cosine | **65.9%** | **94.1%** | **0.786** |
+| Embeddings (this project) | 63.1% | 88.2% | 0.745 |
 
-This works well because each resume was generated with a skill vocabulary
-that reflects its target role — text similarity recovers that role most of
-the time.
+Embeddings clearly beat the weak baselines, but a plain TF-IDF ranker is
+**slightly ahead of them on this dataset**. That is a real result, not a bug
+(the scoring reproduces the random-guess floor of 1/51 exactly). A likely
+reason, which I have not tested, is that every resume is generated from a skill
+vocabulary that appears almost verbatim in its target job description, which
+favors exact word overlap; embeddings are meant to help when the wording
+differs. On this templated data they are not shown to earn their extra weight.
 
 ### The Best Match classifier: honest about its limits
 
@@ -322,6 +329,10 @@ What to keep in mind when reading the results:
 
 ## Limitations
 
+- **The embeddings don't beat a lexical baseline here** — TF-IDF is slightly
+  ahead on every retrieval metric (see
+  [above](#how-the-matcher-works)). Showing a real advantage needs text where
+  resumes and job descriptions use different words for the same skills.
 - **Closed-set retrieval only** — the matcher ranks among the 51 jobs seen
   during training; it doesn't generalize to unseen job postings.
 - **The `Best Match` classifier is weak by design** — see
