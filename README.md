@@ -5,29 +5,59 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![uv](https://img.shields.io/badge/managed%20with-uv-de5fe9)
 
-A semantic resume-to-job matcher with an automated fairness audit and
-drift monitoring, built on a fully local MLOps stack (`uv`, DVC, MLflow,
-Evidently) — no cloud account required to run it.
+Resume-to-job matching studied on two datasets: a **real recruiting export that cannot be
+published** (a privacy-first pipeline and an honest evaluation) and a **public synthetic
+dataset** (a semantic matcher, a fairness audit and drift monitoring). Everything runs locally
+on `uv`, DVC, MLflow and Evidently; no cloud account is needed.
 
-Given a resume, it ranks a catalog of job descriptions by embedding
-similarity and skill overlap. While checking whether the dataset's `Best
-Match` label could be trained on, it surfaces a severe, quantifiable gender
-bias baked into the label itself. That finding, and how the project is
-deliberately designed not to reproduce it, is the core of this project.
+This started as a postgraduate Datathon submission: a plain classifier over seven categorical
+fields, hosted on AWS S3 because the course was an AWS partner. This is the rebuild.
 
-This started as a Datathon submission: a plain classifier over 7
-categorical fields, with no text signal, hosted on AWS S3 because the
-course was an AWS partner. This is the rebuild — a real retrieval-based
-matcher instead of a blind categorical classifier, and an honest audit of
-the data it's trained on.
+## Highlights
+
+- **Real data, real constraint.** 42,482 applicants, 14,081 vacancies and 53,759 candidacies
+  from a recruiting company, delivered for a datathon challenge. It contains personal data and
+  is not published; the repository ships the code that handles it, never the data.
+- **A privacy pipeline that was attacked.** Allowlisted columns, salted hashed ids, layered
+  scrubbing of free text, atomic private output. It was reviewed by automated code reviews and
+  by two outside reviews of the masked sample; each round found leaks the previous checks had
+  missed, and each fix has a test ([docs/masking.md](docs/masking.md)).
+- **Leakage found and removed.** Reviews caught two ways the future leaked into training; the
+  corrected evaluation changed the headline numbers ([below](#from-masked-tables-to-a-ranking-problem)).
+- **The strongest signal was an artifact.** The gap between a vacancy's request and a
+  candidacy beats every model, but it measures how recruiters work, not candidate quality.
+- **An honest result.** The best clean model gains about 6 points of top-1 accuracy over random
+  in one label setting, but it is statistically indistinguishable from a plain TF-IDF rule, and
+  in the other setting nothing beats random.
+- **A biased public dataset.** On the synthetic data the `Best Match` label turns out to be
+  driven by gender within each role, so the project is built not to reproduce it.
+
+## Public code, private data
+
+| | Needs the private data | Runs for anyone who clones the repo |
+|---|---|---|
+| Masking, loader, features, rankers (`src/ingest.py`, `masked_data.py`, `features.py`, `ranker.py`) | to produce results | tests, with synthetic fixtures |
+| Result tables in this README | already computed, aggregates only | read them |
+| Synthetic-data matcher, fairness audit, API, drift monitor | no (public Kaggle CSV) | `make train`, `make serve`, `make test` |
+
+Nothing individual-level (CV text, per-candidate scores, embeddings) leaves the private store.
+`data/masked/`, `data/reference/` and `datathon data/` are gitignored; CI and the Docker image
+contain no data.
 
 ## Contents
 
-- [Features](#features)
-- [The dataset](#the-dataset)
-- [Key finding: the label is gender-biased](#key-finding-the-label-is-gender-biased)
-- [How the matcher works](#how-the-matcher-works)
-- [Drift monitoring](#drift-monitoring)
+- [Part 1: real recruiting data (private)](#part-1-real-recruiting-data-private)
+  - [The data and the constraint](#the-data-and-the-constraint)
+  - [Privacy pipeline](#privacy-pipeline)
+  - [From masked tables to a ranking problem](#from-masked-tables-to-a-ranking-problem)
+  - [Features](#features)
+  - [Results](#results)
+  - [What I would do next](#what-i-would-do-next)
+- [Part 2: synthetic dataset (public)](#part-2-synthetic-dataset-public)
+  - [The dataset](#the-dataset)
+  - [Key finding: the label is gender-biased](#key-finding-the-label-is-gender-biased)
+  - [How the matcher works](#how-the-matcher-works)
+  - [Drift monitoring](#drift-monitoring)
 - [Stack](#stack)
 - [Quick start](#quick-start)
 - [API](#api)
@@ -36,20 +66,144 @@ the data it's trained on.
 - [Responsible use](#responsible-use)
 - [Limitations](#limitations)
 
+---
+
+# Part 1: real recruiting data (private)
+
+## The data and the constraint
+
+Three exports from an applicant tracking system (vacancies, candidates, and the candidacies that
+link them), Portuguese-language, dated 2018-12 to 2025-03. The numbers that shape everything else:
+
+- **77.7% of candidacy outcomes are still pending** (16.8% rejected or withdrawn, 5.6% hired). A
+  pending candidacy is not a negative, so labels are censored.
+- **Structured applicant fields are 81–100% empty** (education, English, area, seniority); the
+  CV text, present for 68% of applicants, carries almost all the signal. All CVs are lowercase.
+- Only about 980 vacancies can be ranked at all (at least two candidates and one hire), and 490
+  when only resolved outcomes are counted.
+- The provider randomized the structured names, phones and emails, but the real names, phones
+  and addresses are still inside the CV text.
+
+The data cannot be published, so the architecture is a private store plus public code, aggregate
+results and write-ups instead of "anyone can clone and run".
+
+## Privacy pipeline
+
+[`src/ingest.py`](src/ingest.py) is the only code that reads the raw archives; it writes masked
+tables that everything else uses ([docs/masking.md](docs/masking.md) has the full policy).
+
+- **Allowlist, not blocklist.** A column that is not named is dropped, so forgetting one cannot
+  leak it. Ids are salted hashes; sex, disability and age band live in a separate table that is
+  never joined into features; dates are generalized to the month.
+- **Layered free-text scrubbing:** labeled personal-data lines, patterns (emails, phones,
+  CPF/RG, dates, ages, marital status, street addresses, neighborhoods), the applicant's own
+  name, a dictionary of Brazilian first names (IBGE census) with an unknown-surname rule, and a
+  multilingual NER model only where text keeps its capitalization.
+- **Why not just NER?** On lowercase CVs a cased NER model recovered only 14% of injected names,
+  and it is the slow part of the run (45 minutes). The dictionary approach is cheap enough to
+  re-apply in minutes (`make repair`). Its measured 90% recall came from synthetic names and
+  overstated real surnames, which an outside review of the masked sample exposed.
+- **Fail-closed, atomic, private.** Output is staged and swapped in only on success, with `0700`
+  and `0600` permissions and a validated salt.
+- **Measured, not asserted.** Two residual figures are reported and kept apart: how well the
+  masker agrees with itself, and an independent, looser estimate of what slipped through. After
+  masking, a within-vacancy ranking rule still gained about 4 points of top-1 accuracy over
+  random, so privacy cost no measurable signal.
+
+The result is **pseudonymized, not anonymous**: employers, schools and dates stay in the text on
+purpose, because they are the signal. It is for controlled access only.
+
+## From masked tables to a ranking problem
+
+[`src/masked_data.py`](src/masked_data.py) turns candidacies into labeled (vacancy, candidate)
+pairs ([docs/real-data.md](docs/real-data.md)).
+
+- **Label.** `hired = 1`, reported under two settings: *resolved-only* (honest labels, small) and
+  *all-prospects* (pending counted as not hired: larger, noisier).
+- **Rolling temporal evaluation.** Train on every vacancy up to a cutoff, test on the next six
+  months, move forward. The labels are rebuilt *as of the cutoff*: a candidacy that had not
+  started, or an outcome recorded later (or with no date), counts as pending, and only then are
+  the rankable vacancies chosen.
+- **Two leaks, found in review.** First, selecting rankable vacancies before the split let a hire
+  recorded after the cutoff decide what the training set contained. Second, within-vacancy
+  context was computed over a pool that depended on who had been resolved. Fixing both removed
+  the apparent signals of an earlier version (for example an education gap at +6 points), which
+  is why the numbers below are smaller than the first draft's.
+- **Exact, tie-aware metrics.** hit@k and reciprocal rank with the expectation over tie orders
+  computed in closed form and checked against brute force, plus paired bootstrap intervals over
+  vacancies.
+
 ## Features
 
-- **Embedding retrieval matcher** — resumes ranked against a 51-job catalog by
-  `sentence-transformers` similarity, benchmarked against random, skill-overlap
-  and TF-IDF baselines.
-- **Fairness audit** — checks the training label itself for demographic
-  skew before trusting it, independent of any model.
-- **Drift monitoring** — compares real logged requests against a training
-  reference built the same way, with a threshold alert and a minimum
-  sample-size guard.
-- **Fully local MLOps stack** — `uv` for dependencies, DVC for data
-  versioning, MLflow for experiment tracking, all with local defaults and
-  zero required cloud credentials.
-- **FastAPI service + Docker**, with a Streamlit drift dashboard.
+[`src/features.py`](src/features.py), fit on the training period only, in four families:
+
+1. **Text match:** TF-IDF on words and characters, title similarity, coverage of a vacancy's
+   distinctive words in the CV and skills, optional multilingual-e5 cosine.
+2. **Structured match:** education and language gaps, area and SAP match, a seniority cue, and
+   "was this field filled in" flags (missingness is itself informative).
+3. **Within-vacancy context:** each score as a z-score and rank among the vacancy's candidates.
+4. **History, from the past only:** an applicant's earlier candidacies and hires, a client's
+   earlier hire rate. A row at month *t* sees only candidacies started before *t* and outcomes
+   recorded before *t*.
+
+Never features: sex, disability, age band, the funnel status and outcome dates (they *are* the
+outcome), and the ids.
+
+**A signal that is not a signal.** The months between a vacancy's request and a candidacy
+(`lag_months`) was the strongest feature: +10 points on resolved-only. But recruiters keep adding
+candidates until someone is hired, so the hire tends to be the latest one added (68% of the time
+in resolved vacancies against a 40% base rate). That is funnel dynamics, not candidate quality,
+and it would not exist when ranking a fresh pool. It is reported as a diagnostic and excluded from
+the clean models.
+
+## Results
+
+Rolling folds, 244 test vacancies (resolved-only) and 474 (all-prospects). Gain in top-1 hit rate
+over a random order, with a 95% bootstrap interval over vacancies:
+
+| Method | resolved-only | all-prospects |
+|---|---|---|
+| TF-IDF zero-shot | +2.2 [-4.0, +7.8] | +3.6 [-0.2, +7.2] |
+| Logistic | -4.2 [-9.6, +1.2] | +2.0 [-1.5, +5.4] |
+| Boosted trees | -3.8 [-9.5, +1.7] | +2.2 [-1.4, +5.9] |
+| Logistic, within-vacancy centered | -0.6 [-6.2, +4.9] | +4.1 [+0.4, +8.0] |
+| Boosted trees, within-vacancy centered | +1.9 [-3.7, +7.8] | **+6.4 [+2.7, +10.1]** |
+| `lag_months` alone (process artifact) | +10.4 [+7.3, +13.9] | +4.5 [+2.6, +6.4] |
+
+How to read it:
+
+- Plain pointwise models do no better than TF-IDF; their largest weight is the number of
+  candidates in the vacancy, which cannot help rank candidates *inside* it. Centering every
+  feature on its vacancy mean (a change made after seeing these results, one of about nine
+  variants) removes that.
+- The best clean model is boosted trees, centered, on all-prospects (+6.4). Its paired difference
+  to plain TF-IDF is +2.8 [-1.5, +7.3], so it cannot be told apart from the zero-shot rule. On
+  resolved-only, the cleaner label, nothing beats random.
+- All-prospects counts pending candidates as not hired, which adds label noise.
+
+**Summary:** the data supports a small text-matching signal (about +4 points) that a plain TF-IDF
+rule already captures. The engineered features and supervised models add, at best, a few points
+that the available test vacancies cannot confirm.
+
+## What I would do next
+
+- A pairwise or lambda-rank objective, and the embedding feature (`make rank ARGS=--embed`).
+- More outcomes: much of the censoring is recent; the same pipeline would be re-run as outcomes
+  resolve.
+- Treat this as a decision-support signal at most, never an automatic screen (see
+  [Responsible use](#responsible-use)).
+
+```bash
+make ingest          # mask the raw archives (needs private access)
+make repair          # re-apply the masking layers in minutes
+make data-summary    # label settings and splits, aggregates only
+make feature-report  # each feature alone as a ranking rule
+make rank            # rolling-fold rankers
+```
+
+---
+
+# Part 2: synthetic dataset (public)
 
 ## The dataset
 
@@ -142,6 +296,7 @@ reason, which I have not tested, is that every resume is generated from a skill
 vocabulary that appears almost verbatim in its target job description, which
 favors exact word overlap; embeddings are meant to help when the wording
 differs. On this templated data they are not shown to earn their extra weight.
+The real data in Part 1 points the same way: TF-IDF is hard to beat there too.
 
 ### The Best Match classifier: honest about its limits
 
@@ -181,10 +336,12 @@ Meant to run on a schedule (cron/systemd timer), not just manually. The
 request log is a rolling window: it keeps the newest 10,000 requests
 (`REQUEST_LOG_MAX_ROWS`) and trims once it grows 10% past that, so it can't grow without bound.
 
+---
+
 ## Stack
 
 Everything runs on `uv` — no manual `pip`/`venv`, no `requirements.txt`.
-The dataset ([`data/external/`](data/external)) is tracked with
+The public dataset ([`data/external/`](data/external)) is tracked with
 [DVC](https://dvc.org): git stores only a small pointer file with its
 checksum, which is how you verify you have the right CSV. No shared remote
 is configured, so the project works fully offline with zero credentials.
@@ -196,6 +353,8 @@ is configured, so the project works fully offline with zero credentials.
   DVC-supported one (local path, S3, MinIO, GCS, Azure...) with
   `dvc remote add --local -d <name> <url>` — `--local` keeps it out of the
   committed config.
+- **The real data is deliberately outside DVC and git:** it stays in a private, gitignored
+  location, and only code and aggregates are committed.
 
 See [`.env.example`](.env.example) for all configurable environment
 variables.
@@ -204,7 +363,8 @@ variables.
 
 Requires [`uv`](https://docs.astral.sh/uv/) (it installs the pinned Python 3.12
 on its own). The first run downloads the `all-MiniLM-L6-v2` embedding model
-(~80 MB) from the Hugging Face Hub.
+(~80 MB) from the Hugging Face Hub. This path uses only the public dataset; the
+real-data commands in Part 1 need private access.
 
 ### Get the data
 
@@ -235,7 +395,8 @@ make lint                      # ruff + mypy
 ```
 
 `make train` writes the artifacts the API loads (`models/`). Until it has
-run, the API tests are skipped rather than failed.
+run, the API tests are skipped rather than failed. `make test` needs no data at all: the
+real-data modules are tested on small synthetic fixtures.
 
 ### Docker (no credentials needed)
 
@@ -273,23 +434,38 @@ curl -X POST http://localhost:8000/match \
 ```
 .
 ├── data/
-│   ├── external/            # Kaggle dataset, versioned with DVC
+│   ├── external/            # public Kaggle dataset, versioned with DVC
 │   ├── processed/           # drift reference (generated by `make train`)
-│   └── logs/                 # real requests logged at runtime
-├── models/                   # skill vocabulary and job catalog (generated)
-├── reports/                  # fairness audit (generated by `make train`)
+│   ├── logs/                # real requests logged at runtime
+│   ├── masked/              # masked real data (private, gitignored)
+│   └── reference/           # public name lists used by masking (gitignored)
+├── docs/
+│   ├── masking.md           # privacy policy, layers, measured recall, limits
+│   └── real-data.md         # label, split, features, results
+├── models/                  # skill vocabulary and job catalog (generated)
+├── reports/                 # fairness audit (generated by `make train`)
 ├── src/
-│   ├── data_preparation.py   # resume parsing, skill extraction, splitting
-│   ├── embeddings.py         # sentence-transformers wrapper
-│   ├── matcher.py            # job catalog, ranking, retrieval metrics
-│   ├── train_model.py        # full training pipeline (MLflow + fairness + drift ref)
-│   ├── predict_model.py      # inference: match_resume()
-│   ├── fairness_audit.py     # demographic bias audit
-│   ├── drift_monitor.py      # batch-live drift comparison with alerting
-│   ├── api.py                 # FastAPI (/match)
-│   ├── monitor_app.py         # Streamlit drift dashboard
-│   └── utils.py                # logging, local I/O, request logging
-└── tests/
+│   │  # real recruiting data (private)
+│   ├── masking.py           # scrubbing layers: patterns, names, NER, ids
+│   ├── ingest.py            # raw archives -> masked tables (atomic, `--repair`)
+│   ├── masked_data.py       # labeled pairs, as-of-cutoff labels, rolling splits
+│   ├── features.py          # text, structured, context and history features
+│   ├── rank_metrics.py      # exact tie-aware hit@k / MRR, paired bootstrap
+│   ├── feature_report.py    # each feature alone as a ranking rule
+│   ├── ranker.py            # rolling-fold logistic / boosted rankers
+│   │  # synthetic public dataset
+│   ├── data_preparation.py  # resume parsing, skill extraction, splitting
+│   ├── embeddings.py        # sentence-transformers wrapper
+│   ├── matcher.py           # job catalog, ranking, retrieval metrics
+│   ├── baselines.py         # random / skill overlap / TF-IDF comparison
+│   ├── train_model.py       # full training pipeline (MLflow + fairness + drift ref)
+│   ├── predict_model.py     # inference: match_resume()
+│   ├── fairness_audit.py    # demographic bias audit
+│   ├── drift_monitor.py     # batch-live drift comparison with alerting
+│   ├── api.py               # FastAPI (/match)
+│   ├── monitor_app.py       # Streamlit drift dashboard
+│   └── utils.py             # logging, local I/O, request logging
+└── tests/                   # synthetic fixtures only; no data needed
 ```
 
 ## Testing & quality
@@ -300,6 +476,11 @@ make lint     # ruff check + mypy
 uv run pre-commit run --all-files
 ```
 
+The leakage and privacy guards are mutation-checked: each protection was deleted in turn and the
+tests were confirmed to fail (strict-past history, outcomes dated when recorded, labels rebuilt
+as of the cutoff, vocabularies fit on the training period, the canary that plants identifiers in
+every sensitive field and asserts none survives).
+
 ## Responsible use
 
 This is a portfolio and research project, **not a hiring tool**. Don't use it,
@@ -309,9 +490,16 @@ and need legal and bias review that this project has not had.
 
 What to keep in mind when reading the results:
 
-- **The data is synthetic.** Every resume follows one template (a single regex
+- **The real data is personal data.** It is processed under controlled access, pseudonymized
+  rather than anonymized, and never published. Under Brazil's data protection law pseudonymized
+  data is still personal data, and publishing a masked version would need the data owner's
+  permission, which masking does not replace.
+- **Real-data results are small and uncertain.** The honest summary is a weak text-matching
+  signal that a plain TF-IDF rule already captures; the largest apparent effect was a process
+  artifact. Nothing here supports automated decisions about people.
+- **The synthetic data is synthetic.** Every resume follows one template (a single regex
   parses all 10,000), only 51 job descriptions exist, and 547 names repeat
-  across the 10,000 rows. Nothing here supports conclusions about real
+  across the 10,000 rows. Nothing there supports conclusions about real
   hiring.
 - **`Best Match` is not ground truth.** It is strongly gender-skewed within
   each role and, despite its documented definition, unrelated to the
@@ -320,8 +508,9 @@ What to keep in mind when reading the results:
 - **Leaving out protected attributes is not a fairness guarantee.** The
   classifier never sees `Gender`, `Race`, or `Ethnicity`, but on real resumes
   text embeddings can carry proxies for them (names, pronouns, schools,
-  employment gaps). The resumes in this dataset contain none of those, so it
-  cannot test that risk.
+  employment gaps). The synthetic resumes contain none of those, so they
+  cannot test that risk; the real-data pipeline keeps sex, disability and age band out of the
+  features but has not been audited for proxies in the CV text.
 - **The audit is narrower than it looks.** It measures skew in the label by
   group. Its "residual gap" table shows roughly zero for the classifier only
   because the classifier says nearly the same thing for everyone, which is not
@@ -333,6 +522,18 @@ What to keep in mind when reading the results:
 
 ## Limitations
 
+- **Real data cannot be shared**, so the real-data results cannot be reproduced by others; the
+  code, tests and aggregate numbers are the evidence.
+- **Small test sets.** Even with rolling folds there are 244 and 474 test vacancies, so most
+  intervals are wide; read the ranking of methods, not the point estimates.
+- **Censored labels.** 77.7% of outcomes are pending; the all-prospects label is noisy, and the
+  resolved-only label is small.
+- **Retrospective evaluation.** The within-vacancy context describes the completed candidate
+  pool, so the evaluation ranks a finished pool rather than replaying each application.
+- **Profiles are snapshots.** The applicant records are as exported, which may be later than
+  what a recruiter saw at the time.
+- **Masking is not a proof.** Residual estimates are heuristics; unknown names deeper than the
+  top of a CV are only caught if their surname is in the dictionary.
 - **The embeddings don't beat a lexical baseline here** — TF-IDF is slightly
   ahead on every retrieval metric (see
   [above](#how-the-matcher-works)). Showing a real advantage needs text where
