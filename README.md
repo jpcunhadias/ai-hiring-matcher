@@ -177,7 +177,9 @@ make drift-check   # run once
 make monitor       # Streamlit dashboard
 ```
 
-Meant to run on a schedule (cron/systemd timer), not just manually.
+Meant to run on a schedule (cron/systemd timer), not just manually. The
+request log is a rolling window: it keeps only the newest 10,000 requests
+(`REQUEST_LOG_MAX_ROWS`), so it can't grow without bound.
 
 ## Stack
 
@@ -241,8 +243,10 @@ run, the API tests are skipped rather than failed.
 docker compose up
 ```
 
+This starts the API on port 8000 and the drift dashboard on port 8501.
 `models/` and `data/` are mounted as volumes — train locally (`make train`)
-before bringing the container up for the first time.
+before bringing the containers up for the first time. The image is CPU-only
+(about 2 GB) and contains no data or models.
 
 ## API
 
