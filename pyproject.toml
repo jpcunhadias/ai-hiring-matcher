@@ -12,6 +12,7 @@ dependencies = [
     "mlflow>=3.15.2",
     "numpy>=2.5.2",
     "pandas>=2.3.3",
+    "pyarrow>=25.0.1",
     "pydantic>=2.13.5",
     "python-dotenv>=1.2.3",
     "scikit-learn>=1.9.0",
@@ -51,7 +52,8 @@ exclude = ["notebooks/"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-addopts = "--disable-warnings"
+addopts = "--disable-warnings -m 'not slow'"
+markers = ["slow: needs the real NER model (downloads ~700 MB); run with -m slow"]
 
 # Linux (CI, Docker) would otherwise resolve CUDA torch + ~15 nvidia-* packages
 # (several GB) for a CPU-only project. macOS keeps the default PyPI wheel.
