@@ -178,8 +178,8 @@ make monitor       # Streamlit dashboard
 ```
 
 Meant to run on a schedule (cron/systemd timer), not just manually. The
-request log is a rolling window: it keeps only the newest 10,000 requests
-(`REQUEST_LOG_MAX_ROWS`), so it can't grow without bound.
+request log is a rolling window: it keeps the newest 10,000 requests
+(`REQUEST_LOG_MAX_ROWS`) and trims once it grows 10% past that, so it can't grow without bound.
 
 ## Stack
 
