@@ -37,6 +37,9 @@ models/
 data/processed/
 data/logs/
 
+# Real challenge data (applicants, vacancies, prospects): personal data, never commit.
+datathon data/
+
 # MLflow local tracking store
 mlruns/
 mlflow.db
