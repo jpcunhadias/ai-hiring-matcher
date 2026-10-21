@@ -14,10 +14,34 @@ make repair                       # re-apply the masking layers to the existing 
 uv run python -m src.ingest --ner none --limit 300 --review 20   # quick look
 ```
 
-The raw zips are read straight into memory (nothing is extracted to disk). The run is
-**fail-closed and atomic**: it builds a complete private staging generation and only then
-swaps it in, so an error never leaves new files next to old ones, and the previous generation
-is kept as `.previous` until the swap succeeds.
+The raw zips are read straight into memory (nothing is extracted to disk). A run is
+**fail-closed on errors and on detected residue**, and publishes in two steps:
+
+* Everything is built in a private staging directory first. An error, or a **privacy gate**
+  failure (below), leaves the previous generation untouched and writes no salt file.
+* Publishing is two renames, not one atomic operation: the live directory becomes `.previous`,
+  then the staging directory takes its place. Between the two there is no live directory. A
+  crash there is recovered automatically on the next run or load (`.previous` is put back, so
+  the salt it holds is not lost) and stale staging directories are removed. One writer at a time
+  is assumed. Every generation carries a `GENERATION` marker; the loader reads it before and
+  after reading the four tables and retries if it changed, so it never mixes two generations.
+
+### The privacy gate
+
+Before anything is published, the finished tables are checked and publication is **blocked**
+(with counts only in the message) if any of these is non-zero:
+
+* the masker's own patterns still match its output (self-consistency);
+* the applicant's own name survives in a CV;
+* the independent checks find an ISO date, a labeled personal-data line, marital status or
+  children, or an email-like token (`name@domain`, with or without a top-level domain).
+
+The softer estimates (domains, spaced numbers, "NN anos" tenure lines) have known false
+positives and are reported, not enforced. The gate enforces invariants a finished table must
+satisfy; it cannot make heuristic masking exhaustive. A phone number in a format no pattern
+knows would pass it. The name list is also required: without the first-name file the run stops
+instead of silently switching the name layer off (`--no-name-dictionary` waives it, and the
+report then says so).
 
 ## What happens to each field
 
@@ -32,7 +56,7 @@ The output tables are built from an explicit **allowlist**. A field that is not 
 | Sex, disability flag, birth date | moved to a **separate table** (`sensitive`), birth date generalized to a 10-year age band computed at the snapshot date; for audits only, never features |
 | Candidacy and requisition dates | generalized to the **month** |
 | Recruiter, analyst, requester, client-contact names and phones; recruiter comments; vacancy names and objectives; neighborhood and city; commercial values | **dropped** |
-| Education/language levels, seniority, contract type, priority, state, SAP flag, workflow status | **kept** as categories |
+| Education/language levels, seniority, contract type, priority, state, SAP flag, workflow status, modality, sex, disability flag | **kept** as categories, and **validated**: a value that carries anything a pattern would mask (an email, phone, date, labeled line), an `@`, or is longer than 120 characters is replaced by `[REDACTED]`; the report counts replacements per column |
 | CV text, skills, area, certifications, titles, vacancy activities and competencies | kept as text, **scrubbed** (below) |
 
 ## How free text is scrubbed
@@ -49,7 +73,8 @@ Layers run in this order on every free-text field:
    masked in a personal-data context only ("nascida em [DATE], 34 anos."); "mais de 10 anos
    de experiência" stays. Year ranges such as `2015-2018` are left alone.
 3. **The applicant's own name**, from the structured record: accent-insensitive,
-   whole-phrase, also for short names.
+   whole-phrase, also for short names. The record can hold the name in two fields; each distinct
+   spelling is masked on its own (never glued into one phrase, which would match nothing).
 4. **Name chains from a dictionary.** A run of 2–4 tokens on one line that starts with a
    common Brazilian first name and continues with name tokens is masked. The dictionary is
    the 3,000 most frequent first names of the IBGE census plus the name tokens that occur in
@@ -61,9 +86,12 @@ Layers run in this order on every free-text field:
    often has one word per line). Deeper in a text this is off, because there an unknown word after a
    first name is more often a school or employer. `santo`/`santa`/`são` never start a chain
    (`Santo André` is a place). Commas and line breaks end a chain.
-5. **Named-entity recognition** (multilingual BERT), only on short fields that keep their
-   capitalization (titles, professional title). Spans are split at technology and job words
-   that appear in many documents, so `Analista Maria` masks only `Maria`. Organizations are
+5. **Named-entity recognition** (multilingual BERT), only on fields that keep their
+   capitalization: vacancy titles, activities and competencies, and the applicant's professional
+   title. Spans are split at protected words, so `Analista Maria` masks only `Maria`. Protected
+   words are seniority and role words plus generic tokens that are frequent in the field *and
+   are not personal-name tokens*: frequency alone never protects a word, because a frequent first
+   name would then escape the model. Organizations are
    *not* masked: the model also tags technologies such as SAP or Oracle as organizations,
    which would erase the skills this project matches on.
 
@@ -98,15 +126,32 @@ when a layer is added or fixed; it takes a few minutes instead of a full re-inge
   tables, report, review sample. It was mutation-checked.
 - The output schemas are exactly the allowlisted columns.
 - Surrogate ids are stable, salted, namespaced, and not the original ids.
-- A failing NER step writes nothing; a failure mid-publish keeps the previous generation.
+- A failing NER step writes nothing; a failure mid-publish keeps the previous generation; a
+  crash between the two renames is recovered.
+- The privacy gate blocks publication on any hard residual, and a missing name list stops the run.
+- Retained categories that carry personal data are replaced; a short name present in both name
+  fields is masked and not reported as surviving.
 - Output permissions are `0700`/`0600` regardless of the caller's umask; a missing, empty,
-  short or world-readable salt is rejected or tightened.
-- `--repair` is idempotent.
+  short or world-readable salt is rejected or tightened. A salt given in the environment must
+  agree with the stored one.
+- `--repair` refuses to run without the original salt, and refuses a salt that does not
+  reproduce the ids already published (it never invents one); it is idempotent.
+- Errors raised while masking carry no text from the data: the message names the stage and the
+  exception type only, the original is not chained, and the command line withholds details of
+  unexpected errors (`INGEST_DEBUG=1` shows them for debugging on synthetic data).
+- Every protection above was mutation-checked: deleting it makes a test fail.
 
 ## What it does not guarantee
 
-Masking lowers risk; it does not prove anonymity. Known residual risks:
+Masking lowers risk; it does not prove anonymity, and no heuristic masker can promise output free
+of every identifier. Withholding the free text altogether would, but it is the signal. Known
+residual risks:
 
+- **Formats nobody wrote a pattern for**: the gate enforces specific invariants, not "no
+  personal data".
+- **Third-party libraries' error text**: confidentiality of error messages is enforced for this
+  code; whether the real NER dependency ever echoes its input in its own messages has not been
+  established, which is why exceptions are not chained or printed.
 - **Employer names** stay in the CV text (see above). Together with schools, dates and the
   state, a career history can be close to unique.
 - **Names the dictionary does not know**, a first name written on its own, and personal details
