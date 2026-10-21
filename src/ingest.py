@@ -13,6 +13,8 @@ report under data/masked/ (gitignored). It never logs record content.
 
 All output is written to a private staging directory and swapped into place only when every
 file is complete: an error leaves the previous generation untouched and creates no salt file.
+A publication gate checks the finished tables first and blocks publication if the hard residual
+checks find anything; errors raised while masking carry no text from the data.
 """
 
 import argparse
@@ -23,9 +25,10 @@ import re
 import secrets
 import shutil
 import tempfile
+import uuid
 import zipfile
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -46,6 +49,7 @@ from src.masking import (
     name_tokens,
     parse_date,
     residual_pattern_counts,
+    sanitize_category,
     surrogate_id,
     to_month,
 )
@@ -59,6 +63,36 @@ _WORD_RE = re.compile(r"[^\W\d_]+")
 PROTECTED_MIN_DF = 30  # tokens in at least this many short texts are generic, not names
 KNOWN_WORD_MIN_DF = 3  # vacancy words in at least this many vacancies count as ordinary vocabulary
 MIN_SALT_BYTES = 16
+GENERATION_FILE = "GENERATION"
+# Seniority and role words that a model may mistake for names. Protection from NER comes from
+# this list and from generic tokens that are not personal-name tokens, never from frequency alone
+# ("maria" is frequent in titles and must still be maskable).
+PROTECTED_WORDS = frozenset(
+    "junior jr pleno pl senior sr especialista trainee estagiario assistente auxiliar analista "
+    "coordenador gerente supervisor lider".split()
+)
+# Residual checks that must be zero before anything is published. The soft ones (domains, spaced
+# numbers, tenure lines) have known false positives and are only reported.
+HARD_RESIDUAL_CHECKS = (
+    "iso_date", "labeled_value", "label_then_digits", "label_alone_then_text",
+    "marital_or_children", "email_like",
+)  # fmt: skip
+CATEGORY_COLUMNS = {
+    "vacancies": ["is_sap", "contract_type", "priority", "seniority", "education_level",
+                  "english_level", "spanish_level", "state"],
+    "applicants": ["education_level", "english_level", "spanish_level", "seniority"],
+    "sensitive": ["sex", "pcd"],
+    "candidacies": ["status", "modality"],
+}  # fmt: skip
+
+
+class MaskingError(RuntimeError):
+    """A masking step failed. The message never contains text from the data."""
+
+
+class PrivacyGateError(RuntimeError):
+    """Publication was blocked. The message holds counts only."""
+
 
 HIRED_STATUSES = {"Contratado pela Decision", "Contratado como Hunting", "Proposta Aceita"}
 REJECTED_STATUSES = {
@@ -122,22 +156,63 @@ def frequent_tokens(texts: list[str], min_df: int) -> set[str]:
     return {t for t, n in counts.items() if n >= min_df}
 
 
+def protected_vocabulary(texts: list[str], dictionary: NameDictionary | None) -> set[str]:
+    """Words the NER model must leave alone: seniority and role words, plus generic tokens that
+    are frequent in the field and are not personal-name tokens. A frequent first name stays
+    maskable."""
+    names = dictionary.name_tokens if dictionary else frozenset()
+    generic = {fold(t) for t in frequent_tokens(texts, PROTECTED_MIN_DF)} - set(names)
+    return generic | PROTECTED_WORDS
+
+
 class TextMasker:
     """`plain`: patterns + own name + name chains (lowercase-safe, no model).
-    `mixed`: plain + NER, for short fields that keep their capitalization."""
+    `mixed`: plain + NER, for short fields that keep their capitalization.
+
+    Any failure surfaces as a `MaskingError` with no text from the data in its message."""
 
     def __init__(self, ner: EntityMasker | None = None, dictionary: NameDictionary | None = None):
         self.ner: EntityMasker = ner or NoEntityMasker()
         self.dictionary = dictionary
         self.stats: Counter = Counter()
 
-    def plain(self, texts: list[str], names: list[str] | None = None) -> list[str]:
-        return mask_texts(texts, names, None, self.stats, self.dictionary)
+    def _guarded(self, stage: str, work: Callable[[], list[str]]) -> list[str]:
+        try:
+            return work()
+        except MaskingError:
+            raise
+        except Exception as exc:
+            raise MaskingError(
+                f"masking failed in {stage} ({type(exc).__name__}); the original message is "
+                "withheld because it may contain personal text"
+            ) from None
 
-    def mixed(self, texts: list[str], names: list[str] | None = None) -> list[str]:
-        if isinstance(self.ner, HFEntityMasker):
-            self.ner.protected = {fold(t) for t in frequent_tokens(texts, PROTECTED_MIN_DF)}
-        return mask_texts(texts, names, self.ner, self.stats, self.dictionary)
+    def plain(self, texts: list[str], names: Sequence[Sequence[str]] | None = None) -> list[str]:
+        return self._guarded(
+            "the pattern and name layers",
+            lambda: mask_texts(texts, names, None, self.stats, self.dictionary),
+        )
+
+    def mixed(self, texts: list[str], names: Sequence[Sequence[str]] | None = None) -> list[str]:
+        def work() -> list[str]:
+            if isinstance(self.ner, HFEntityMasker):
+                self.ner.protected = protected_vocabulary(texts, self.dictionary)
+            return mask_texts(texts, names, self.ner, self.stats, self.dictionary)
+
+        return self._guarded("the name-recognition layer", work)
+
+
+def sanitize_categories(tables: dict[str, pd.DataFrame]) -> dict[str, int]:
+    """Replace, in place, any retained category value that does not look like a category.
+    Returns the number of replacements per `table.column` (counts only)."""
+    replaced: dict[str, int] = {}
+    for table, columns in CATEGORY_COLUMNS.items():
+        for column in columns:
+            results = [sanitize_category(v) for v in tables[table][column].fillna("")]
+            tables[table][column] = [value for value, _ in results]
+            if n := sum(was for _, was in results):
+                replaced[f"{table}.{column}"] = n
+    return replaced
 
 
 # --- table builders (pure: take the parsed JSON dicts) --------------------------------------
@@ -170,11 +245,20 @@ def build_vacancies(vagas: dict, masker: TextMasker, salt: bytes) -> pd.DataFram
     )[VACANCY_COLUMNS]
 
 
-def applicant_names(record: dict) -> str:
-    """Every spelling of the person's own name, from both structured name fields."""
-    first = dig(record, "informacoes_pessoais", "nome")
-    second = dig(record, "infos_basicas", "nome")
-    return f"{first} {second}".strip()
+def applicant_names(record: dict) -> list[str]:
+    """Every distinct spelling of the person's own name, one entry per structured name field.
+    They are kept apart: gluing two spellings into one phrase ("Li Wu Li Wu") would match no
+    text that contains the name once."""
+
+    def key(name: str) -> str:
+        return " ".join(fold(word) for word in name.split())
+
+    spellings: list[str] = []
+    for path in (("informacoes_pessoais", "nome"), ("infos_basicas", "nome")):
+        name = dig(record, *path)
+        if name and all(key(name) != key(other) for other in spellings):
+            spellings.append(name)
+    return spellings
 
 
 def build_sensitive(applicants: dict, salt: bytes, snapshot: date) -> pd.DataFrame:
@@ -278,7 +362,8 @@ def build_name_dictionary(
         return None
     pool: set[str] = set()
     for a in applicants.values():
-        pool.update(name_tokens(applicant_names(a)))
+        for spelling in applicant_names(a):
+            pool.update(name_tokens(spelling))
     for v in vagas.values():
         for field in STAFF_NAME_FIELDS:
             pool.update(name_tokens(dig(v, "informacoes_basicas", field)))
@@ -405,32 +490,62 @@ def _write_new_private_file(path: Path, content: str) -> None:
         f.write(content)
 
 
+def _read_salt_file(path: Path) -> bytes:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"{path} is not a regular file")
+    salt = bytes.fromhex(path.read_text().strip())
+    if len(salt) < MIN_SALT_BYTES:
+        raise ValueError(f"{path} holds a weak salt (under {MIN_SALT_BYTES} bytes)")
+    if path.stat().st_mode & 0o077:
+        path.chmod(0o600)
+        logger.warning("Tightened permissions on %s to 0600", path)
+    return salt
+
+
 def resolve_salt(out_dir: Path) -> tuple[bytes, bool]:
-    """(salt, is_new). A new salt only exists in memory until the run has succeeded."""
+    """(salt, is_new). A new salt only exists in memory until the run has succeeded.
+
+    A salt given in the environment must agree with the salt stored beside an existing
+    generation: ids hashed under one key and published next to the other key's file would be
+    silently unlinkable."""
+    path = out_dir / ".salt"
     if os.getenv("MASKING_SALT"):
         salt = os.environ["MASKING_SALT"].encode()
         if len(salt) < MIN_SALT_BYTES:
             raise ValueError(f"MASKING_SALT must be at least {MIN_SALT_BYTES} bytes")
+        if path.exists() and _read_salt_file(path) != salt:
+            raise ValueError(
+                "MASKING_SALT differs from the salt stored with the existing generation"
+            )
         return salt, False
-    path = out_dir / ".salt"
     if path.exists():
-        if not path.is_file() or path.is_symlink():
-            raise ValueError(f"{path} is not a regular file")
-        salt = bytes.fromhex(path.read_text().strip())
-        if len(salt) < MIN_SALT_BYTES:
-            raise ValueError(f"{path} holds a weak salt (under {MIN_SALT_BYTES} bytes)")
-        if path.stat().st_mode & 0o077:
-            path.chmod(0o600)
-            logger.warning("Tightened permissions on %s to 0600", path)
-        return salt, False
+        return _read_salt_file(path), False
     return secrets.token_bytes(32), True
+
+
+def recover_generation(out_dir: Path) -> None:
+    """Undo an interrupted publish and clear what it left behind.
+
+    Publishing renames the live directory to `.previous` and then the staged one into place. A
+    crash between the two renames leaves only `.previous`; it is put back so that nothing (not
+    even the salt it holds) is lost. Staging directories of crashed runs are removed. One
+    writer at a time is assumed."""
+    backup = out_dir.with_name(f"{out_dir.name}.previous")
+    if not out_dir.exists() and backup.exists():
+        backup.rename(out_dir)
+        logger.warning("Recovered the previous generation after an interrupted publish")
+    for stale in out_dir.parent.glob(f".{out_dir.name}.staging-*"):
+        shutil.rmtree(stale, ignore_errors=True)
 
 
 def publish(out_dir: Path, write: Callable[[Path], None], new_salt: bytes | None) -> None:
     """Write a complete generation into a private staging dir, then swap it into place.
 
     On any error the staging dir is removed, the previous generation is untouched, and no salt
-    file is created. Directories are 0700 and files 0600.
+    file is created. Directories are 0700 and files 0600. The swap is two renames, not one
+    atomic operation: between them there is no live directory, which `recover_generation` and
+    the loader's generation check cover. Every generation carries a marker file so a reader can
+    tell that all its files came from the same one.
     """
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.staging-", dir=out_dir.parent))
@@ -438,6 +553,7 @@ def publish(out_dir: Path, write: Callable[[Path], None], new_salt: bytes | None
     backup = out_dir.with_name(f"{out_dir.name}.previous")
     try:
         write(staging)
+        _write_new_private_file(staging / GENERATION_FILE, uuid.uuid4().hex)
         if new_salt is not None:
             _write_new_private_file(staging / ".salt", new_salt.hex())
         elif (out_dir / ".salt").exists():
@@ -490,17 +606,68 @@ def _writer(
     return write
 
 
+def privacy_gate(report: dict) -> None:
+    """Block publication when the hard residual checks find anything.
+
+    The hard checks are the ones whose residue cannot be a false positive in a finished table:
+    the masker's own patterns (agreement with itself), the applicant's own name, and the
+    independent checks for ISO dates, labeled personal-data lines, marital status and email-like
+    tokens. The softer estimates are reported, not enforced: they cannot prove anonymity either
+    way. The message holds counts only."""
+    problems: dict[str, int] = {}
+    if total := sum(sum(v.values()) for v in report["self_consistency_residual_hits"].values()):
+        problems["self_consistency"] = total
+    if n := report["cv_texts_with_surviving_own_name"]:
+        problems["own_name_survivors"] = n
+    for field, counts in report["independent_residual_estimate"].items():
+        for check in HARD_RESIDUAL_CHECKS:
+            if counts.get(check):
+                problems[f"{field}.{check}"] = counts[check]
+    if problems:
+        raise PrivacyGateError(
+            "publication blocked by the privacy gate (counts per check): "
+            + json.dumps(problems, sort_keys=True)
+        )
+
+
+def _require_dictionary(dictionary: NameDictionary | None, required: bool, path: Path) -> None:
+    if dictionary is None and required:
+        raise ValueError(
+            f"the first-name list {path} is required (the name layer would be silently off); "
+            "pass --no-name-dictionary to run without it"
+        )
+
+
+def _finish(
+    tables: dict[str, pd.DataFrame],
+    masker: TextMasker,
+    residual: int,
+    sources: dict,
+    snapshot: date,
+    mode: str,
+) -> dict:
+    """Sanitize categories, build the report, and run the publication gate."""
+    replaced = sanitize_categories(tables)
+    report = build_report(tables, masker, residual, sources, snapshot, mode)
+    report["categories_replaced"] = replaced
+    privacy_gate(report)
+    report["privacy_gate"] = "passed"
+    return report
+
+
 def run(
     raw_dir: Path,
     out_dir: Path,
     ner: EntityMasker,
     limit: int | None = None,
     review: int = 0,
-    first_names_csv: Path = FIRST_NAMES_CSV,
+    first_names_csv: Path | None = None,
     top_k: int = 3000,
+    require_name_dictionary: bool = True,
 ) -> dict:
     if review < 0:
         raise ValueError("--review must be zero or positive")
+    recover_generation(out_dir)
     salt, is_new = resolve_salt(out_dir)
     vagas, prospects, applicants = (
         read_archive(raw_dir, n) for n in ("vagas", "prospects", "applicants")
@@ -512,7 +679,9 @@ def run(
         len(applicants),
     )
     snapshot = snapshot_date(prospects)
+    first_names_csv = first_names_csv or FIRST_NAMES_CSV
     dictionary = build_name_dictionary(applicants, vagas, first_names_csv, top_k)
+    _require_dictionary(dictionary, require_name_dictionary, first_names_csv)
     if limit:
         vagas = dict(list(vagas.items())[:limit])
         applicants = dict(list(applicants.items())[:limit])
@@ -530,7 +699,7 @@ def run(
         "candidacies": candidacies,
     }
     sources = {n: md5_of(raw_dir / f"{n}.zip") for n in ("vagas", "prospects", "applicants")}
-    report = build_report(tables, masker, residual, sources, snapshot, mode="full")
+    report = _finish(tables, masker, residual, sources, snapshot, "full")
     publish(
         out_dir,
         _writer(tables, report, _sample_cvs(applicants_t, review)),
@@ -539,13 +708,32 @@ def run(
     return report
 
 
+def _verify_salt_matches(
+    existing: dict[str, pd.DataFrame], vagas: dict, applicants: dict, salt: bytes
+) -> None:
+    """Every id already published must be what this salt produces for the raw ids, otherwise the
+    rebuilt tables would silently disagree with the ones kept."""
+    wanted = {
+        "applicants": ("candidate_id", {surrogate_id("cand", i, salt) for i in applicants}),
+        "vacancies": ("vacancy_id", {surrogate_id("vac", i, salt) for i in vagas}),
+    }
+    for table, (column, expected) in wanted.items():
+        stranger = set(existing[table][column]) - expected - {""}
+        if stranger:
+            raise ValueError(
+                f"the salt does not reproduce {len(stranger)} {table} ids already published; "
+                "refusing to repair with the wrong salt"
+            )
+
+
 def repair(
     raw_dir: Path,
     out_dir: Path,
     ner: EntityMasker,
     review: int = 0,
-    first_names_csv: Path = FIRST_NAMES_CSV,
+    first_names_csv: Path | None = None,
     top_k: int = 3000,
+    require_name_dictionary: bool = True,
 ) -> dict:
     """Re-apply the current layers to the EXISTING masked tables, without a full re-run.
 
@@ -556,17 +744,27 @@ def repair(
     """
     if review < 0:
         raise ValueError("--review must be zero or positive")
-    salt, _ = resolve_salt(out_dir)
+    recover_generation(out_dir)
+    salt, is_new = resolve_salt(out_dir)
+    if is_new:
+        raise ValueError(
+            "repair needs the original salt (MASKING_SALT or the generation's .salt file); "
+            "a new one would re-hash every id and leave the tables unlinkable"
+        )
     existing = {name: pd.read_parquet(out_dir / f"{name}.parquet") for name in TABLE_COLUMNS}
     vagas, prospects, applicants = (
         read_archive(raw_dir, n) for n in ("vagas", "prospects", "applicants")
     )
+    _verify_salt_matches(existing, vagas, applicants, salt)
     snapshot = snapshot_date(prospects)
-    masker = TextMasker(ner, build_name_dictionary(applicants, vagas, first_names_csv, top_k))
+    first_names_csv = first_names_csv or FIRST_NAMES_CSV
+    dictionary = build_name_dictionary(applicants, vagas, first_names_csv, top_k)
+    _require_dictionary(dictionary, require_name_dictionary, first_names_csv)
+    masker = TextMasker(ner, dictionary)
 
     names_by_id = {surrogate_id("cand", i, salt): applicant_names(a) for i, a in applicants.items()}
     app = existing["applicants"].copy()
-    names = [names_by_id.get(c, "") for c in app["candidate_id"]]
+    names = [names_by_id.get(c, []) for c in app["candidate_id"]]
     app["cv_text"] = masker.plain(app["cv_text"].tolist(), names)
     app["area"] = masker.plain(app["area"].tolist(), names)
     app["technical_skills"] = masker.plain(app["technical_skills"].tolist(), names)
@@ -592,7 +790,7 @@ def repair(
         "candidacies": existing["candidacies"][CANDIDACY_COLUMNS],
     }
     sources = {n: md5_of(raw_dir / f"{n}.zip") for n in ("vagas", "prospects", "applicants")}
-    report = build_report(tables, masker, residual, sources, snapshot, mode="repair")
+    report = _finish(tables, masker, residual, sources, snapshot, "repair")
     publish(out_dir, _writer(tables, report, _sample_cvs(app, review)), None)
     return report
 
@@ -614,6 +812,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--top-k", type=int, default=3000, help="how many common first names to use"
     )
+    parser.add_argument(
+        "--no-name-dictionary",
+        action="store_true",
+        help="run without the first-name list (the name layer is then off; not for real data)",
+    )
     args = parser.parse_args(argv)
 
     ner: EntityMasker
@@ -621,10 +824,27 @@ def main(argv: list[str] | None = None) -> None:
         ner = HFEntityMasker(entity_types=("PER", "ORG") if args.mask_orgs else ("PER",))
     else:
         ner = NoEntityMasker()
-    if args.repair:
-        report = repair(RAW_DIR, OUT_DIR, ner, args.review, args.first_names, args.top_k)
-    else:
-        report = run(RAW_DIR, OUT_DIR, ner, args.limit, args.review, args.first_names, args.top_k)
+    strict = not args.no_name_dictionary
+    try:
+        if args.repair:
+            report = repair(
+                RAW_DIR, OUT_DIR, ner, args.review, args.first_names, args.top_k, strict
+            )
+        else:
+            report = run(
+                RAW_DIR, OUT_DIR, ner, args.limit, args.review, args.first_names, args.top_k,
+                strict,
+            )  # fmt: skip
+    except (MaskingError, PrivacyGateError, ValueError, FileNotFoundError) as exc:
+        # raised by this module with static, content-free messages
+        raise SystemExit(f"ingest stopped: {exc}") from None
+    except Exception as exc:
+        if os.getenv("INGEST_DEBUG"):
+            raise
+        raise SystemExit(
+            f"ingest failed ({type(exc).__name__}); details are withheld because they may "
+            "contain personal text (set INGEST_DEBUG=1 to see them)"
+        ) from None
     logger.info(
         "Done (%s). Aggregate report written to %s/masking_report.json", report["mode"], OUT_DIR
     )

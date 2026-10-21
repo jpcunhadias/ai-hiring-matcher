@@ -154,6 +154,14 @@ def _everything_written(out_dir: Path) -> str:
     return "\n".join(parts)
 
 
+@pytest.fixture(autouse=True)
+def tiny_first_names(tmp_path_factory, monkeypatch):
+    """The real IBGE list is gitignored; tests bring their own two-name list."""
+    path = tmp_path_factory.mktemp("names") / "names.csv"
+    path.write_text("Nome,1930,1940\nMARIA,100,200\nJOSE,50,60\n", encoding="utf-8")
+    monkeypatch.setattr(ingest, "FIRST_NAMES_CSV", path)
+
+
 @pytest.fixture
 def raw_dir(tmp_path):
     directory = tmp_path / "raw"
@@ -280,15 +288,20 @@ def test_name_dictionary_layer_masks_names_the_structured_record_does_not_know(
     assert report["name_dictionary"]["first_names"] == 2
 
 
-def test_missing_first_name_file_disables_the_layer_and_the_report_says_so(
+def test_a_missing_first_name_list_stops_the_run_unless_explicitly_waived(
     raw_dir, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("MASKING_SALT", SALT.decode())
+    missing = tmp_path / "nope.csv"
+
+    with pytest.raises(ValueError, match="first-name list .* is required"):
+        ingest.run(raw_dir, tmp_path / "out", NoEntityMasker(), first_names_csv=missing)
+    assert not (tmp_path / "out").exists()  # nothing was written
 
     report = ingest.run(
-        raw_dir, tmp_path / "out", NoEntityMasker(), first_names_csv=tmp_path / "nope.csv"
-    )
-
+        raw_dir, tmp_path / "out", NoEntityMasker(), first_names_csv=missing,
+        require_name_dictionary=False,
+    )  # fmt: skip
     assert report["name_dictionary"] is None
 
 
@@ -550,3 +563,323 @@ def test_repair_needs_an_existing_generation(raw_dir, tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError):
         ingest.repair(raw_dir, tmp_path / "missing", NoEntityMasker())
+
+
+# --- the publication gate -----------------------------------------------------------------
+
+
+def _clean_report():
+    zero = {c: 0 for c in ("iso_date", "labeled_value", "email_like", "phone_like")}
+    return {
+        "self_consistency_residual_hits": {"applicants.cv_text": {"EMAIL": 0}},
+        "independent_residual_estimate": {"applicants.cv_text": dict(zero)},
+        "cv_texts_with_surviving_own_name": 0,
+    }
+
+
+def test_the_gate_passes_a_clean_report_and_ignores_the_soft_estimates():
+    report = _clean_report()
+    report["independent_residual_estimate"]["applicants.cv_text"].update(
+        phone_like=98, url_or_domain=1163, age_like=198, long_digit_run=3471
+    )
+
+    ingest.privacy_gate(report)  # soft checks have false positives: reported, not enforced
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (lambda r: r["self_consistency_residual_hits"]["applicants.cv_text"].update(EMAIL=2),
+         "self_consistency"),
+        (lambda r: r.update(cv_texts_with_surviving_own_name=1), "own_name_survivors"),
+        (lambda r: r["independent_residual_estimate"]["applicants.cv_text"].update(email_like=3),
+         "applicants.cv_text.email_like"),
+        (lambda r: r["independent_residual_estimate"]["applicants.cv_text"].update(iso_date=1),
+         "applicants.cv_text.iso_date"),
+        (lambda r: r["independent_residual_estimate"]["applicants.cv_text"].update(
+            labeled_value=1), "applicants.cv_text.labeled_value"),
+    ],
+)  # fmt: skip
+def test_the_gate_blocks_on_each_hard_check_and_its_message_holds_counts_only(mutate, expected):
+    report = _clean_report()
+    mutate(report)
+
+    with pytest.raises(ingest.PrivacyGateError, match="blocked") as caught:
+        ingest.privacy_gate(report)
+
+    assert expected in str(caught.value)
+    assert not any(c.isalpha() and c.isupper() for c in str(caught.value).split(": ", 1)[1])
+
+
+def test_a_blocked_publication_writes_nothing_and_keeps_the_previous_generation(
+    raw_dir, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MASKING_SALT", SALT.decode())
+    out = tmp_path / "out"
+    ingest.run(raw_dir, out, NoEntityMasker())
+    before = (out / "applicants.parquet").read_bytes()
+    monkeypatch.setattr(ingest, "residual_pattern_counts", lambda texts: {"EMAIL": 1})
+
+    with pytest.raises(ingest.PrivacyGateError):
+        ingest.run(raw_dir, out, NoEntityMasker())
+
+    assert (out / "applicants.parquet").read_bytes() == before
+    assert not list(tmp_path.glob(".out.staging-*"))
+
+
+def test_a_normal_run_passes_the_gate_and_records_it(masked):
+    _, report = masked
+
+    assert report["privacy_gate"] == "passed"
+    assert report["categories_replaced"] == {}
+
+
+# --- retained categories ------------------------------------------------------------------
+
+
+def test_a_personal_string_in_a_retained_category_is_replaced_and_counted(
+    raw_dir, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MASKING_SALT", SALT.decode())
+    applicants = json.loads(zipfile.ZipFile(raw_dir / "applicants.zip").read("applicants.json"))
+    person = applicants["200"]
+    person["formacao_e_idiomas"]["nivel_ingles"] = "jane.doe@example.com"
+    person["informacoes_profissionais"]["nivel_profissional"] = "ligar (11) 98765-4321"
+    person["informacoes_pessoais"]["sexo"] = "nasc 1990-04-02"
+    with zipfile.ZipFile(raw_dir / "applicants.zip", "w") as z:
+        z.writestr("applicants.json", json.dumps(applicants))
+
+    report = ingest.run(raw_dir, tmp_path / "out", NoEntityMasker())
+
+    out = tmp_path / "out"
+    everything = _everything_written(out)
+    for leaked in ("jane.doe", "98765", "1990-04-02"):
+        assert leaked not in everything
+    table = pd.read_parquet(out / "applicants.parquet")
+    assert table["english_level"].tolist() == ["[REDACTED]"]
+    assert table["education_level"].tolist() == ["Ensino Superior Completo"]  # untouched
+    assert report["categories_replaced"] == {
+        "applicants.english_level": 1, "applicants.seniority": 1, "sensitive.sex": 1,
+    }  # fmt: skip
+
+
+def test_category_columns_cover_every_retained_category():
+    retained = {
+        "vacancies": {"is_sap", "contract_type", "priority", "seniority", "education_level",
+                      "english_level", "spanish_level", "state"},
+        "applicants": {"education_level", "english_level", "spanish_level", "seniority"},
+        "sensitive": {"sex", "pcd"},
+        "candidacies": {"status", "modality"},
+    }  # fmt: skip
+
+    assert {t: set(c) for t, c in ingest.CATEGORY_COLUMNS.items()} == retained
+
+
+# --- own-name spellings -------------------------------------------------------------------
+
+
+def test_applicant_names_keep_each_spelling_apart_and_drop_duplicates():
+    person = {"informacoes_pessoais": {"nome": "Li Wu"}, "infos_basicas": {"nome": "LI  WU"}}
+    other = {"informacoes_pessoais": {"nome": "João Silva"}, "infos_basicas": {"nome": "Joao S."}}
+
+    assert ingest.applicant_names(person) == ["Li Wu"]
+    assert ingest.applicant_names(other) == ["João Silva", "Joao S."]
+    assert ingest.applicant_names({}) == []
+
+
+def test_a_short_name_present_in_both_fields_is_masked_and_not_reported_as_a_survivor(
+    raw_dir, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MASKING_SALT", SALT.decode())
+    applicants = json.loads(zipfile.ZipFile(raw_dir / "applicants.zip").read("applicants.json"))
+    person = applicants["200"]
+    person["informacoes_pessoais"]["nome"] = person["infos_basicas"]["nome"] = "Li Wu"
+    person["cv_pt"] = "li wu\nexperiencia em python"
+    with zipfile.ZipFile(raw_dir / "applicants.zip", "w") as z:
+        z.writestr("applicants.json", json.dumps(applicants))
+
+    report = ingest.run(raw_dir, tmp_path / "out", NoEntityMasker())
+
+    text = pd.read_parquet(tmp_path / "out" / "applicants.parquet")["cv_text"].iloc[0]
+    assert "li wu" not in text.lower() and report["cv_texts_with_surviving_own_name"] == 0
+
+
+# --- what the NER model may not be told to ignore ------------------------------------------
+
+
+def test_protection_comes_from_role_words_and_generic_tokens_never_from_a_frequent_first_name():
+    from src.masking import NameDictionary
+
+    texts = [f"Maria Analista Python {i}" for i in range(40)]
+    dictionary = NameDictionary.build(["maria"], [])
+
+    protected = ingest.protected_vocabulary(texts, dictionary)
+
+    assert "maria" not in protected  # frequent, but a person's name
+    assert {"analista", "junior", "pleno"} <= protected  # role and seniority words
+    assert "python" in protected  # generic and not a name
+    assert "maria" in ingest.protected_vocabulary(texts, None)  # no dictionary, no exclusion
+
+
+def test_a_first_name_that_is_frequent_in_titles_is_still_masked_by_the_ner_layer(
+    raw_dir, tmp_path, monkeypatch
+):
+    from src.masking import HFEntityMasker
+
+    def pipe(chunks, batch_size, stride):  # flags every "Maria" as a person
+        found = []
+        for chunk in chunks:
+            at = chunk.find("Maria")
+            hit = {"entity_group": "PER", "score": 0.99, "start": at, "end": at + 5}
+            found.append([hit] if at >= 0 else [])
+        return found
+
+    monkeypatch.setenv("MASKING_SALT", SALT.decode())
+    vagas = json.loads(zipfile.ZipFile(raw_dir / "vagas.zip").read("vagas.json"))
+    template = vagas["100"]
+    vagas = {str(1000 + i): json.loads(json.dumps(template)) for i in range(35)}
+    for i, vacancy in enumerate(vagas.values()):
+        vacancy["informacoes_basicas"]["titulo_vaga"] = f"Maria Analista {i} Python"
+    with zipfile.ZipFile(raw_dir / "vagas.zip", "w") as z:
+        z.writestr("vagas.json", json.dumps(vagas))
+
+    ingest.run(raw_dir, tmp_path / "out", HFEntityMasker(pipe=pipe))
+
+    titles = pd.read_parquet(tmp_path / "out" / "vacancies.parquet")["title"]
+    assert not titles.str.contains("Maria").any()
+    assert titles.str.contains("Analista").all()  # the role word is protected
+
+
+# --- salt and repair ----------------------------------------------------------------------
+
+
+def test_repair_without_the_original_salt_is_refused_and_changes_nothing(
+    raw_dir, tmp_path, monkeypatch
+):
+    monkeypatch.delenv("MASKING_SALT", raising=False)
+    out = tmp_path / "out"
+    ingest.run(raw_dir, out, NoEntityMasker())  # creates a file salt
+    (out / ".salt").unlink()  # ... which is then lost
+    before = {p.name: p.read_bytes() for p in out.glob("*.parquet")}
+
+    with pytest.raises(ValueError, match="original salt"):
+        ingest.repair(raw_dir, out, NoEntityMasker())
+
+    assert {p.name: p.read_bytes() for p in out.glob("*.parquet")} == before
+    assert not (out / ".salt").exists()  # no invented salt either
+
+
+def test_repair_with_a_salt_that_does_not_reproduce_the_published_ids_is_refused(
+    raw_dir, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MASKING_SALT", SALT.decode())
+    out = tmp_path / "out"
+    ingest.run(raw_dir, out, NoEntityMasker())  # an env salt leaves no .salt file behind
+    monkeypatch.setenv("MASKING_SALT", "x" * 32)
+
+    with pytest.raises(ValueError, match="does not reproduce"):
+        ingest.repair(raw_dir, out, NoEntityMasker())
+
+
+def test_an_environment_salt_that_differs_from_the_stored_one_is_refused(
+    raw_dir, tmp_path, monkeypatch
+):
+    monkeypatch.delenv("MASKING_SALT", raising=False)
+    out = tmp_path / "out"
+    ingest.run(raw_dir, out, NoEntityMasker())  # file salt
+    monkeypatch.setenv("MASKING_SALT", "y" * 32)
+
+    with pytest.raises(ValueError, match="differs from the salt"):
+        ingest.run(raw_dir, out, NoEntityMasker())
+    with pytest.raises(ValueError, match="differs from the salt"):
+        ingest.repair(raw_dir, out, NoEntityMasker())
+
+
+def test_repair_with_the_right_salt_still_works_after_the_checks(raw_dir, tmp_path, monkeypatch):
+    monkeypatch.delenv("MASKING_SALT", raising=False)
+    out = tmp_path / "out"
+    ingest.run(raw_dir, out, NoEntityMasker())
+
+    report = ingest.repair(raw_dir, out, NoEntityMasker())
+
+    assert report["mode"] == "repair" and report["privacy_gate"] == "passed"
+
+
+# --- an interrupted publish ---------------------------------------------------------------
+
+
+def test_a_crash_between_the_two_renames_is_recovered_and_the_salt_survives(
+    raw_dir, tmp_path, monkeypatch
+):
+    monkeypatch.delenv("MASKING_SALT", raising=False)
+    out = tmp_path / "out"
+    ingest.run(raw_dir, out, NoEntityMasker())
+    ids = pd.read_parquet(out / "applicants.parquet")["candidate_id"].tolist()
+    out.rename(tmp_path / "out.previous")  # the crash: no live directory, only the backup
+    (tmp_path / ".out.staging-dead").mkdir()  # and a staging directory nobody finished
+
+    ingest.run(raw_dir, out, NoEntityMasker())  # the next run must not invent a new salt
+
+    assert pd.read_parquet(out / "applicants.parquet")["candidate_id"].tolist() == ids
+    assert not (tmp_path / "out.previous").exists() and not list(tmp_path.glob(".out.staging-*"))
+
+
+def test_each_generation_carries_a_marker_that_changes_on_every_publish(
+    raw_dir, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MASKING_SALT", SALT.decode())
+    out = tmp_path / "out"
+
+    ingest.run(raw_dir, out, NoEntityMasker())
+    first = (out / ingest.GENERATION_FILE).read_text()
+    ingest.run(raw_dir, out, NoEntityMasker())
+
+    assert first and (out / ingest.GENERATION_FILE).read_text() != first
+    assert (out / ingest.GENERATION_FILE).stat().st_mode & 0o077 == 0
+
+
+# --- errors never carry personal text -----------------------------------------------------
+
+
+class _Leaky:
+    def mask_many(self, texts):
+        raise RuntimeError("model failed on: " + texts[0])
+
+
+def test_a_masking_failure_surfaces_without_the_text_or_the_original_message(
+    raw_dir, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MASKING_SALT", SALT.decode())
+
+    with pytest.raises(ingest.MaskingError) as caught:
+        ingest.run(raw_dir, tmp_path / "out", _Leaky())
+
+    message = str(caught.value)
+    assert "Desenvolvedor" not in message and "model failed" not in message
+    assert "RuntimeError" in message  # the type is safe and useful
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_command_line_withholds_unexpected_error_details(monkeypatch):
+    def explode(*args, **kwargs):
+        raise RuntimeError("secret person text")
+
+    monkeypatch.setattr(ingest, "run", explode)
+
+    with pytest.raises(SystemExit) as caught:
+        ingest.main(["--ner", "none"])
+    assert "secret" not in str(caught.value) and "RuntimeError" in str(caught.value)
+
+    monkeypatch.setenv("INGEST_DEBUG", "1")
+    with pytest.raises(RuntimeError, match="secret person text"):
+        ingest.main(["--ner", "none"])
+
+
+def test_the_command_line_shows_our_own_static_messages(monkeypatch):
+    monkeypatch.setattr(
+        ingest, "run", lambda *a, **k: (_ for _ in ()).throw(ValueError("needs a salt"))
+    )
+
+    with pytest.raises(SystemExit, match="needs a salt"):
+        ingest.main(["--ner", "none"])
