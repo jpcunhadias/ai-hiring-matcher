@@ -562,3 +562,33 @@ def test_age_band_uses_the_attained_age_on_the_snapshot_date():
 def test_age_band_moves_with_the_snapshot_not_a_hardcoded_year():
     assert age_band("2001-01-01", date(2025, 6, 1)) == "<25"
     assert age_band("2001-01-01", date(2026, 6, 1)) == "25-34"
+
+
+def test_an_email_without_a_top_level_domain_is_still_an_email():
+    assert mask_patterns("joao.silva@gmail ou x") == "[EMAIL] ou x"
+    assert mask_patterns("analista @ empresa") == "analista @ empresa"  # spaces: not an address
+    assert mask_patterns("(@usuario)") == "(@usuario)"  # a bare handle has no local part
+    assert independent_residual_counts(["fale com a@b"])["email_like"] == 1
+    assert independent_residual_counts(["analista @ empresa"])["email_like"] == 0
+
+
+def test_own_name_masking_takes_several_spellings_one_by_one():
+    assert mask_own_name("li wu e wu li e ana", ["Li Wu", "Wu Li"]) == "[NAME] e [NAME] e ana"
+    assert mask_own_name("li wu", ["Li Wu", ""]) == "[NAME]"
+    assert mask_own_name("li wu", []) == "li wu"
+    # the glued form is what used to hide the name: two copies in one phrase match nothing
+    assert mask_own_name("li wu", "Li Wu Li Wu") == "li wu"
+
+
+def test_a_retained_category_must_look_like_a_category():
+    from src.masking import sanitize_category
+
+    assert sanitize_category("Ensino Superior Completo") == ("Ensino Superior Completo", False)
+    assert sanitize_category("Alta: Alta complexidade 3 a 5 dias") == (
+        "Alta: Alta complexidade 3 a 5 dias",
+        False,
+    )  # digits alone are fine
+    assert sanitize_category("  ") == ("", False) and sanitize_category(None) == ("", False)
+    for personal in ("jane@example.com", "ligar (11) 98765-4321", "nasc 1990-04-02", "x" * 200,
+                     "Estado civil: casada"):  # fmt: skip
+        assert sanitize_category(personal) == ("[REDACTED]", True), personal
