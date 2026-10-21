@@ -34,7 +34,7 @@ from typing import Literal
 
 import pandas as pd
 
-from src.ingest import TABLE_COLUMNS
+from src.ingest import GENERATION_FILE, TABLE_COLUMNS, recover_generation
 from src.utils import logger
 
 MASKED_DIR = Path(os.getenv("MASKED_DIR", "data/masked"))
@@ -70,19 +70,32 @@ class Split:
     test_pool: pd.DataFrame  # every candidacy of the test vacancies, whatever its outcome
 
 
+def _generation(directory: Path) -> str:
+    marker = directory / GENERATION_FILE
+    return marker.read_text().strip() if marker.exists() else ""
+
+
 def load_masked(masked_dir: Path | None = None) -> MaskedTables:
-    """Read the four masked tables, failing loudly if one is missing or has the wrong columns."""
+    """Read the four masked tables, failing loudly if one is missing or has the wrong columns.
+
+    All four files must come from the same generation: the marker is read before and after, and
+    the read is repeated if a new generation was published in between."""
     directory = masked_dir or MASKED_DIR
-    frames: dict[str, pd.DataFrame] = {}
-    for name, columns in TABLE_COLUMNS.items():
-        path = directory / f"{name}.parquet"
-        if not path.exists():
-            raise FileNotFoundError(f"{path} not found: run `make ingest` first")
-        frame = pd.read_parquet(path)
-        if list(frame.columns) != list(columns):
-            raise ValueError(f"{path} has unexpected columns {list(frame.columns)}")
-        frames[name] = frame
-    return MaskedTables(**frames)
+    recover_generation(directory)
+    for _ in range(3):
+        before = _generation(directory)
+        frames: dict[str, pd.DataFrame] = {}
+        for name, columns in TABLE_COLUMNS.items():
+            path = directory / f"{name}.parquet"
+            if not path.exists():
+                raise FileNotFoundError(f"{path} not found: run `make ingest` first")
+            frame = pd.read_parquet(path)
+            if list(frame.columns) != list(columns):
+                raise ValueError(f"{path} has unexpected columns {list(frame.columns)}")
+            frames[name] = frame
+        if _generation(directory) == before:
+            return MaskedTables(**frames)
+    raise RuntimeError(f"{directory} kept changing while it was being read")
 
 
 def _blank_to_na(series: pd.Series) -> pd.Series:
