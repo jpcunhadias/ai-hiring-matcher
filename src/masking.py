@@ -94,7 +94,7 @@ _PT_MONTHS = (
 )
 
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("EMAIL", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")),
+    ("EMAIL", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*")),  # also "joao@gmail" (no TLD)
     (
         "URL",
         re.compile(
@@ -220,6 +220,7 @@ def _mask_bare_ages(text: str, stats: Counter | None = None) -> str:
 
 _INDEPENDENT_CHECKS: dict[str, re.Pattern[str]] = {
     "email_or_at_sign": re.compile(r"@"),
+    "email_like": re.compile(r"[\w.+-]+@[\w-]+"),
     "url_or_domain": re.compile(r"(?:https?:|www\.|\.com\b|\.br\b)", re.IGNORECASE),
     "iso_date": re.compile(r"(?<!\d)(?:19|20)\d{2}-\d{1,2}-\d{1,2}(?!\d)"),
     "numeric_date": re.compile(r"(?<!\d)\d{1,2}[/.]\d{1,2}[/.]\d{2,4}(?!\d)"),
@@ -307,13 +308,21 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
-def mask_own_name(text: str, name: str | None, stats: Counter | None = None) -> str:
+def mask_own_name(text: str, name: str | Sequence[str] | None, stats: Counter | None = None) -> str:
     """Mask the person's own name, accent- and case-insensitively.
 
     Distinctive tokens are masked individually; the whole name is also matched as a phrase,
-    which catches short tokens ("Li Wu") that the token rule skips.
+    which catches short tokens ("Li Wu") that the token rule skips. `name` may be several
+    spellings (the record can hold the name in more than one field); each one is masked on its
+    own, never glued into a single phrase.
     """
-    if not name or not name.strip():
+    if name is None:
+        return text
+    if not isinstance(name, str):
+        for spelling in name:
+            text = mask_own_name(text, spelling, stats)
+        return text
+    if not name.strip():
         return text
     folded = fold(text)
     spans: list[tuple[int, int]] = []
@@ -604,7 +613,7 @@ class HFEntityMasker:
 
 def mask_texts(
     texts: Sequence[str],
-    own_names: Sequence[str | None] | None = None,
+    own_names: Sequence[str | Sequence[str] | None] | None = None,
     ner: EntityMasker | None = None,
     stats: Counter | None = None,
     dictionary: NameDictionary | None = None,
@@ -618,6 +627,23 @@ def mask_texts(
     unique = list(dict.fromkeys(stage))  # the NER model is the slow part: run each text once
     by_text = dict(zip(unique, (ner or NoEntityMasker()).mask_many(unique), strict=True))
     return [by_text[text] for text in stage]
+
+
+# --- retained categories ------------------------------------------------------------------
+
+MAX_CATEGORY_CHARS = 120
+
+
+def sanitize_category(value: str | None) -> tuple[str, bool]:
+    """A retained category must look like a category. A value that carries anything a pattern
+    would mask (an email, a phone, a date, a labeled personal-data line), an '@', or is far too
+    long to be a label is replaced by a placeholder. Returns (value, was_replaced)."""
+    text = (value or "").strip()
+    if not text:
+        return "", False
+    if len(text) > MAX_CATEGORY_CHARS or "@" in text or mask_patterns(text) != text:
+        return "[REDACTED]", True
+    return text, False
 
 
 # --- identifiers and generalization -------------------------------------------------------
