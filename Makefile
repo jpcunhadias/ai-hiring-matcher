@@ -16,11 +16,13 @@ repair:
 data-summary:
 	uv run python -m src.masked_data
 
-# Each feature alone as a ranking rule on the later vacancies (aggregates only)
+# Each feature alone as a ranking rule on the later vacancies (aggregates only, also
+# written to reports/feature_report.md)
 feature-report:
 	uv run python -m src.feature_report $(ARGS)
 
-# Rolling-fold supervised rankers on the masked real data (aggregates only; a few minutes)
+# Rolling-fold supervised rankers on the masked real data (aggregates only, also written
+# to reports/ranker.md; a few minutes)
 rank:
 	uv run python -m src.ranker $(ARGS)
 

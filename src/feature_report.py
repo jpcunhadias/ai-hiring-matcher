@@ -5,6 +5,9 @@
 Prints aggregates only (hit@1 gain over a random order, with a 95% bootstrap interval over
 vacancies); no text or id leaves the masked tables. A feature that is constant inside a
 vacancy (such as the number of candidates) cannot rank anyone and is left out.
+
+The same tables are written to reports/feature_report.md (`--report`), with the masked-data
+generation in its header.
 """
 
 import argparse
@@ -13,10 +16,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src import run_report
 from src.features import PROCESS_ARTIFACTS, Encoder, FeatureBuilder
 from src.masked_data import SETTINGS, build_pairs, load_masked, temporal_split
 from src.rank_metrics import gain_with_ci, per_vacancy_metrics, random_metrics
-from src.utils import logger
+from src.utils import REPORTS_DIR, logger
 
 NOTE = "  <- process artifact, not used by the model"
 SINGLE = [
@@ -43,6 +47,7 @@ def e5_encoder(model_name: str = "intfloat/multilingual-e5-small") -> Encoder:
 
 
 RESULT_COLUMNS = ["feature", "hit@1", "gain", "low", "high"]
+REPORT_PATH = REPORTS_DIR / "feature_report.md"
 
 
 def single_feature_table(test: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
@@ -68,14 +73,49 @@ def single_feature_table(test: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFram
     return table.sort_values("gain", ascending=False).reset_index(drop=True)
 
 
+def report_section(setting: str, split_info: dict, table: pd.DataFrame) -> tuple[str, str]:
+    """One label setting's single-feature table, with the test period it was measured on."""
+    shown = pd.DataFrame(
+        {
+            "feature": [
+                f + (" (process artifact)" if f in PROCESS_ARTIFACTS else "")
+                for f in table["feature"]
+            ],
+            "hit@1": table["hit@1"].map("{:.3f}".format),
+            "gain@1 (pts)": table["gain"].map(run_report.pts),
+            "95% CI": [run_report.interval(lo, hi) for lo, hi in zip(table["low"], table["high"])],
+        }
+    )
+    intro = (
+        f"Test: {split_info['vacancies']} vacancies, {split_info['candidacies']} candidacies, "
+        f"after cutoff {split_info['cutoff']}; random hit@1 {split_info['random']:.3f}."
+    )
+    return setting, intro + "\n\n" + run_report.markdown_table(shown)
+
+
+def write_report(path: Path, sections: list[tuple[str, str]], generation: str, embed: bool) -> Path:
+    meta = {
+        "masked-data generation": generation or run_report.NO_GENERATION,
+        "commit": run_report.git_commit(),
+        "e5 embedding": embed,
+        "bootstrap": "2000 resamples of the test vacancies, seed 0",
+    }
+    return run_report.write(
+        path, run_report.render("Single-feature ranking rules (src.feature_report)", meta, sections)
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--masked-dir", type=Path, default=None)
     parser.add_argument("--embed", action="store_true", help="add the e5 embedding cosine (slow)")
+    parser.add_argument("--report", type=Path, default=REPORT_PATH, help="aggregate tables")
     args = parser.parse_args()
 
-    pairs = build_pairs(load_masked(args.masked_dir))
+    tables = load_masked(args.masked_dir)
+    pairs = build_pairs(tables)
     encoder = e5_encoder() if args.embed else None
+    sections = []
     for setting in SETTINGS:
         split = temporal_split(pairs, setting)
         builder = FeatureBuilder(encoder=encoder).fit(split.train)
@@ -89,13 +129,23 @@ def main() -> None:
             split.cutoff,
             random,
         )
-        for row in single_feature_table(split.test, feats).to_dict("records"):
+        table = single_feature_table(split.test, feats)
+        info = {
+            "vacancies": split.test["vacancy_id"].nunique(),
+            "candidacies": len(split.test),
+            "cutoff": split.cutoff,
+            "random": random,
+        }
+        sections.append(report_section(setting, info, table))
+        for row in table.to_dict("records"):
             gain, low, high = (100 * row[k] for k in ("gain", "low", "high"))
             logger.info(
                 "  %-20s hit@1 %.3f  gain %+.1f pts [%+.1f, %+.1f]%s",
                 row["feature"], row["hit@1"], gain, low, high,
                 NOTE if row["feature"] in PROCESS_ARTIFACTS else "",
             )  # fmt: skip
+    written = write_report(args.report, sections, tables.generation, args.embed)
+    logger.info("aggregate tables written to %s", written)
 
 
 if __name__ == "__main__":

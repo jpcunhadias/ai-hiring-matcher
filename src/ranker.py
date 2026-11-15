@@ -1,6 +1,9 @@
 """Supervised rankers, evaluated over rolling time folds on the masked real data.
 
-    uv run python -m src.ranker --first-cutoff 2021-06 [--step 6] [--embed]
+    uv run python -m src.ranker --first-cutoff 2021-06 [--step 6] [--embed] [--seed 0]
+
+The aggregate tables are also written to reports/ranker.md (`--report`), with the masked-data
+generation, the seeds and the options in its header, so a cited number points at a run.
 
 Each fold trains on every vacancy up to a cutoff, with labels as they stood then, and is tested
 on the next window of vacancies with their final labels. Every vacancy is tested at most once,
@@ -25,13 +28,17 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from src import run_report
 from src.feature_report import e5_encoder
 from src.features import FeatureBuilder, model_features
 from src.masked_data import SETTINGS, Setting, build_pairs, load_masked, rolling_splits
 from src.rank_metrics import gain_with_ci, per_vacancy_metrics, random_metrics
-from src.utils import logger
+from src.utils import REPORTS_DIR, logger
 
 KINDS = ("logistic", "boosted")
+REPORT_PATH = REPORTS_DIR / "ranker.md"
+PER_FOLD_METHODS = ("boosted trees, centered", "tfidf zero-shot")
+FOLD_COLUMNS = ["cutoff", "train_vacancies", "test_vacancies", "test_candidacies"]
 
 
 class Ranker:
@@ -230,6 +237,77 @@ def mean_coefficients(result: RollingResult) -> pd.Series:
     return frame.mean(axis=1).sort_values(key=np.abs, ascending=False)
 
 
+def report_sections(setting: str, result: RollingResult) -> list[tuple[str, str]]:
+    """The aggregate tables of one label setting, as report sections."""
+    folds = pd.DataFrame(result.folds, columns=FOLD_COLUMNS)
+    table = summarize(result)
+    shown = pd.DataFrame(
+        {
+            "method": table["method"],
+            "hit@1": table["hit@1"].map("{:.3f}".format),
+            "gain@1 (pts)": table["gain@1"].map(run_report.pts),
+            "95% CI": [run_report.interval(lo, hi) for lo, hi in zip(table["low"], table["high"])],
+            "gain@3 (pts)": table["gain@3"].map(run_report.pts),
+            "gain MRR": table["gain_mrr"].map("{:+.3f}".format),
+            "vs TF-IDF (pts)": table["vs_tfidf"].map(run_report.pts),
+            "vs TF-IDF 95% CI": [
+                run_report.interval(lo, hi) for lo, hi in zip(table["vs_low"], table["vs_high"])
+            ],
+        }
+    )
+    sections = [
+        (f"{setting}: folds", run_report.markdown_table(folds)),
+        (
+            f"{setting}: gain in top-1 hit rate over a random order, pooled over folds",
+            run_report.markdown_table(shown),
+        ),
+    ]
+    if result.folds:
+        per_fold = pd.DataFrame(
+            {
+                "cutoff": [f["cutoff"] for f in result.folds],
+                "test vacancies": [f["test_vacancies"] for f in result.folds],
+                **{
+                    f"{m} (pts)": [run_report.pts(g["gain"]) for g in fold_gains(result, m)]
+                    for m in PER_FOLD_METHODS
+                    if m in result.per_vacancy
+                },
+            }
+        )
+        sections.append((f"{setting}: gain per fold", run_report.markdown_table(per_fold)))
+    if result.coefficients:
+        weights = mean_coefficients(result).head(8)
+        sections.append(
+            (
+                f"{setting}: clean logistic, mean standardized weight over folds",
+                run_report.markdown_table(
+                    pd.DataFrame(
+                        {"feature": weights.index, "weight": weights.map("{:+.3f}".format)}
+                    )
+                ),
+            )
+        )
+    return sections
+
+
+def write_report(
+    path: Path,
+    results: dict[str, RollingResult],
+    generation: str,
+    options: dict[str, object],
+) -> Path:
+    meta = {
+        "masked-data generation": generation or run_report.NO_GENERATION,
+        "commit": run_report.git_commit(),
+        **options,
+        "bootstrap": "2000 resamples of the test vacancies, seed 0",
+    }
+    sections = [s for setting, result in results.items() for s in report_sections(setting, result)]
+    return run_report.write(
+        path, run_report.render("Rolling-fold rankers (src.ranker)", meta, sections)
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--masked-dir", type=Path, default=None)
@@ -238,14 +316,24 @@ def main() -> None:
     )
     parser.add_argument("--step", type=int, default=6, help="months per test window")
     parser.add_argument("--embed", action="store_true", help="add the e5 embedding cosine (slow)")
+    parser.add_argument("--seed", type=int, default=0, help="seed of the boosted models")
+    parser.add_argument("--report", type=Path, default=REPORT_PATH, help="aggregate tables")
     args = parser.parse_args()
 
-    pairs = build_pairs(load_masked(args.masked_dir))
+    tables = load_masked(args.masked_dir)
+    pairs = build_pairs(tables)
     encoder = e5_encoder() if args.embed else None
+    results: dict[str, RollingResult] = {}
     for setting in SETTINGS:
         result = evaluate_rolling(
-            pairs, setting, args.first_cutoff, args.step, lambda: FeatureBuilder(encoder=encoder)
+            pairs,
+            setting,
+            args.first_cutoff,
+            args.step,
+            lambda: FeatureBuilder(encoder=encoder),
+            seed=args.seed,
         )
+        results[setting] = result
         total = sum(f["test_vacancies"] for f in result.folds)
         logger.info("%s | %d folds, %d test vacancies in total", setting, len(result.folds), total)
         for fold in result.folds:
@@ -263,7 +351,7 @@ def main() -> None:
                 row["method"], row["hit@1"], gain, low, high, 100 * row["gain@3"], row["gain_mrr"],
                 100 * row["vs_tfidf"], 100 * row["vs_low"], 100 * row["vs_high"], note,
             )  # fmt: skip
-        for method in ("boosted trees, centered", "tfidf zero-shot"):
+        for method in PER_FOLD_METHODS:
             per_fold = [
                 f"{g['cutoff']} ({g['vacancies']}v) {100 * g['gain']:+.0f}"
                 for g in fold_gains(result, method)
@@ -272,6 +360,14 @@ def main() -> None:
         if result.coefficients:
             top = mean_coefficients(result).head(8)
             logger.info("  clean logistic, mean standardized weight: %s", top.round(3).to_dict())
+    options = {
+        "model seed": args.seed,
+        "first cutoff": args.first_cutoff,
+        "step (months)": args.step,
+        "e5 embedding": args.embed,
+    }
+    written = write_report(args.report, results, tables.generation, options)
+    logger.info("aggregate tables written to %s", written)
 
 
 if __name__ == "__main__":

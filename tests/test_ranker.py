@@ -14,6 +14,7 @@ from src.ranker import (
     fold_gains,
     mean_coefficients,
     summarize,
+    write_report,
 )
 from tests.test_features import COOK_CV, SAP_CV, hired, pair, small
 from tests.test_masked_data import make_tables
@@ -252,3 +253,28 @@ def test_fold_gains_and_the_paired_difference_to_zero_shot():
         {"cutoff": f["cutoff"], "vacancies": f["test_vacancies"], "gain": 0.0} for f in result.folds
     ]
     assert table.loc["tfidf zero-shot", ["vs_tfidf", "vs_low", "vs_high"]].eq(0.0).all()
+
+
+def test_the_report_holds_the_aggregate_tables_the_seed_and_the_generation(tmp_path):
+    pairs = synthetic_pairs()
+    results = {setting: run(pairs, setting) for setting in ("resolved_only", "all_prospects")}
+
+    path = write_report(tmp_path / "reports" / "ranker.md", results, "gen-42", {"model seed": 7})
+    text = path.read_text()
+
+    assert "- masked-data generation: gen-42" in text and "- model seed: 7" in text
+    for setting in results:
+        assert f"## {setting}: folds" in text
+        assert f"## {setting}: gain in top-1 hit rate over a random order" in text
+        assert f"## {setting}: gain per fold" in text
+    logistic = summarize(results["all_prospects"]).set_index("method").loc["logistic"]
+    assert f"| logistic | {logistic['hit@1']:.3f} | {100 * logistic['gain@1']:+.1f} |" in text
+    # aggregates only: no candidate id or CV text from the pairs reaches the file
+    assert not any(cid in text for cid in pairs["candidate_id"])
+    assert SAP_CV[:30] not in text and COOK_CV[:30] not in text
+
+
+def test_a_report_without_a_generation_marker_says_so(tmp_path):
+    text = write_report(tmp_path / "r.md", {}, "", {}).read_text()
+
+    assert "- masked-data generation: none" in text
