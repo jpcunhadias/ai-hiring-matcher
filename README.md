@@ -27,7 +27,7 @@ fields, hosted on AWS S3 because the course was an AWS partner. This is the rebu
 - **The strongest signal was an artifact.** The gap between a vacancy's request and a
   candidacy beats every model, but it measures how recruiters work, not candidate quality.
 - **An honest result.** The best clean model gains about 6 points of top-1 accuracy over random
-  in one label setting, but it is statistically indistinguishable from a plain TF-IDF rule, and
+  in one label setting (best of ~9 variants, chosen on the same folds), but it is statistically indistinguishable from a plain TF-IDF rule, and
   in the other setting nothing beats random.
 - **A biased public dataset.** On the synthetic data the `Best Match` label turns out to be
   driven by gender within each role, so the project is built not to reproduce it.
@@ -89,7 +89,7 @@ Gain in top-1 hit rate over a random order, rolling folds (244 and 474 test vaca
 | Method | resolved-only | all-prospects |
 |---|---|---|
 | TF-IDF zero-shot | +2.2 [-4.0, +7.8] | +3.6 [-0.2, +7.2] |
-| Boosted trees, within-vacancy centered (best clean model) | +1.9 [-3.7, +7.8] | +6.4 [+2.7, +10.1] |
+| Boosted trees, within-vacancy centered (best clean model; best of ~9 variants, chosen on the same folds) | +1.9 [-3.7, +7.8] | +6.4 [+2.7, +10.1] |
 | `lag_months` alone (process artifact) | +10.4 [+7.3, +13.9] | +4.5 [+2.6, +6.4] |
 
 The data supports a small text-matching signal (about +4 points) that a plain TF-IDF rule already
@@ -111,7 +111,7 @@ make rank            # rolling-fold rankers
 
 ## The dataset
 
-[`job_applicant_dataset.csv`](data/external/job_applicant_dataset.csv)
+`job_applicant_dataset.csv` (not in git; see [Get the data](#get-the-data-1))
 (10,000 rows, [via Kaggle](https://www.kaggle.com/datasets/surendra365/recruitement-dataset))
 provides free-text `Resume` and `Job Description` pairs, a binary
 `Best Match` label, and demographic columns (`Age`, `Gender`, `Race`,
