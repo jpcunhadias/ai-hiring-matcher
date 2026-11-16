@@ -56,6 +56,7 @@ def test_load_masked_reads_the_four_tables(tmp_path):
 
     assert len(loaded.candidacies) == 9
     assert list(loaded.sensitive.columns) == TABLE_COLUMNS["sensitive"]
+    assert loaded.generation == ""  # tables written before the GENERATION marker existed
 
 
 def test_load_masked_fails_loudly_on_a_missing_table_or_changed_schema(tmp_path):
@@ -293,6 +294,7 @@ def test_load_masked_never_mixes_two_generations(tmp_path, monkeypatch):
 
     assert calls["n"] == 8  # the first attempt (4 files) was discarded and repeated in full
     assert len(loaded.vacancies) == 3
+    assert loaded.generation == "gen-b"  # the generation the returned tables were read under
 
 
 def test_load_masked_gives_up_if_the_directory_never_settles(tmp_path, monkeypatch):

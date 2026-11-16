@@ -59,6 +59,7 @@ class MaskedTables:
     applicants: pd.DataFrame
     sensitive: pd.DataFrame
     candidacies: pd.DataFrame
+    generation: str = ""  # the GENERATION marker the tables were read under ("" if none)
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,7 @@ def load_masked(masked_dir: Path | None = None) -> MaskedTables:
                 raise ValueError(f"{path} has unexpected columns {list(frame.columns)}")
             frames[name] = frame
         if _generation(directory) == before:
-            return MaskedTables(**frames)
+            return MaskedTables(**frames, generation=before)
     raise RuntimeError(f"{directory} kept changing while it was being read")
 
 

@@ -1,7 +1,13 @@
 import numpy as np
 import pandas as pd
 
-from src.feature_report import RESULT_COLUMNS, SINGLE, single_feature_table
+from src.feature_report import (
+    RESULT_COLUMNS,
+    SINGLE,
+    report_section,
+    single_feature_table,
+    write_report,
+)
 
 
 def test_single_feature_table_ranks_a_useful_feature_above_noise_and_skips_constants():
@@ -57,3 +63,22 @@ def test_an_all_missing_or_all_constant_report_is_empty_not_an_error():
 
 def test_the_report_covers_every_rankable_feature():
     assert {"spanish_gap", "client_prior_hire_rate"} <= set(SINGLE)
+
+
+def test_the_report_lists_each_setting_with_its_test_period_and_generation(tmp_path):
+    test = vacancies()
+    table = single_feature_table(test, pd.DataFrame({"tfidf_word": test["y"].astype(float)}))
+    info = {"vacancies": 20, "candidacies": 60, "cutoff": "2021-06", "random": 1 / 3}
+
+    path = write_report(
+        tmp_path / "reports" / "feature_report.md",
+        [report_section("all_prospects", info, table)],
+        "gen-7",
+        embed=False,
+    )
+    text = path.read_text()
+
+    assert "- masked-data generation: gen-7" in text
+    assert "## all_prospects" in text and "after cutoff 2021-06" in text
+    assert "| tfidf_word | 1.000 | +66.7 |" in text
+    assert "c0_0" not in text  # aggregates only

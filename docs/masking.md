@@ -106,9 +106,9 @@ GPU for the 172k CV chunks), so dropping it for CVs turns a 45-minute run into m
 Evaluated and rejected: Presidio (a framework with no Portuguese configuration of its own),
 piiranha (no Portuguese), `gliner_multi_pii` (highest precision, but recall around 0.3 here).
 These numbers come from synthetic names, not from labelled real ones, and they overstated the
-dictionary: real surnames are often not in any list, so a real CV with "marcela zorvanelli" kept
-its name until the unknown-surname rule above was added (found by an outside review of the
-review sample). Treat the recall as unknown, somewhere below 90%, for names outside the header.
+dictionary: real surnames are often not in any list, so a real CV whose surname was in no list
+kept its name until the unknown-surname rule above was added (found in a review of the
+masked sample). Treat the recall as unknown, somewhere below 90%, for names outside the header.
 
 ## `--repair`
 
