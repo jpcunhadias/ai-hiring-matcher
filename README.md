@@ -19,9 +19,8 @@ fields, hosted on AWS S3 because the course was an AWS partner. This is the rebu
   from a recruiting company, delivered for a datathon challenge. It contains personal data and
   is not published; the repository ships the code that handles it, never the data.
 - **A privacy pipeline that was attacked.** Allowlisted columns, salted hashed ids, layered
-  scrubbing of free text, atomic private output. It was reviewed by automated code reviews and
-  by two outside reviews of the masked sample; each round found leaks the previous checks had
-  missed, and each fix has a test ([docs/masking.md](docs/masking.md)).
+  scrubbing of free text, atomic private output. It was reviewed in several rounds, and each round
+  found leaks the previous checks had missed; each fix has a test ([docs/masking.md](docs/masking.md)).
 - **Leakage found and removed.** Reviews caught two ways the future leaked into training; the
   corrected evaluation changed the headline numbers ([docs/real-data.md](docs/real-data.md)).
 - **The strongest signal was an artifact.** The gap between a vacancy's request and a
