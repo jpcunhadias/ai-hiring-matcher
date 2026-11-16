@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.ingest import TABLE_COLUMNS
+from src.ingest import GENERATION_FILE, TABLE_COLUMNS
 from src.masked_data import (
     MaskedTables,
     audit_attributes,
@@ -257,3 +257,55 @@ def test_an_explicit_cutoff_overrides_the_fraction():
         temporal_split(pairs, "all_prospects", cutoff="May 2020")
     with pytest.raises(ValueError, match="empty"):
         temporal_split(pairs, "all_prospects", cutoff="2030-01")
+
+
+def _publish(directory, tables, generation):
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in TABLE_COLUMNS:
+        getattr(tables, name).to_parquet(directory / f"{name}.parquet")
+    (directory / GENERATION_FILE).write_text(generation)
+
+
+def test_load_masked_recovers_an_interrupted_publish(tmp_path):
+    out = tmp_path / "masked"
+    _publish(out, make_tables(3), "gen-a")
+    out.rename(tmp_path / "masked.previous")  # a crash between the two renames
+
+    loaded = load_masked(out)
+
+    assert len(loaded.candidacies) == 9 and out.exists()
+
+
+def test_load_masked_never_mixes_two_generations(tmp_path, monkeypatch):
+    out = tmp_path / "masked"
+    _publish(out, make_tables(3), "gen-a")
+    real_read, calls = pd.read_parquet, {"n": 0}
+
+    def swapping(path, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:  # a new generation appears in the middle of the first attempt
+            (out / GENERATION_FILE).write_text("gen-b")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", swapping)
+
+    loaded = load_masked(out)
+
+    assert calls["n"] == 8  # the first attempt (4 files) was discarded and repeated in full
+    assert len(loaded.vacancies) == 3
+
+
+def test_load_masked_gives_up_if_the_directory_never_settles(tmp_path, monkeypatch):
+    out = tmp_path / "masked"
+    _publish(out, make_tables(2), "gen-0")
+    real_read, count = pd.read_parquet, {"n": 0}
+
+    def always_changing(path, *args, **kwargs):
+        count["n"] += 1
+        (out / GENERATION_FILE).write_text(f"gen-{count['n']}")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", always_changing)
+
+    with pytest.raises(RuntimeError, match="kept changing"):
+        load_masked(out)
